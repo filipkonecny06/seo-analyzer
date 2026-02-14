@@ -1,0 +1,69 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>On-Page SEO Analyzer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero card">
+        <h1>On-Page SEO Analyzer</h1>
+        <p>Analyze any public page URL and get an SEO quality score with targeted recommendations.</p>
+
+        <form id="analyzer-form" class="form" autocomplete="off">
+          <label for="url-input">URL</label>
+          <div class="row">
+            <input id="url-input" name="url" placeholder="https://example.com/blog-post" required />
+            <button id="analyze-btn" type="submit">Analyze</button>
+          </div>
+        </form>
+
+        <p id="status" class="status"></p>
+      </section>
+
+      <section id="result" class="result hidden">
+        <article class="card score-card">
+          <h2>SEO Score</h2>
+          <p id="score-value" class="score-value"></p>
+          <p id="score-meta" class="muted"></p>
+        </article>
+
+        <article class="card">
+          <h2>Top Recommendations</h2>
+          <ul id="recommendations" class="plain-list"></ul>
+        </article>
+
+        <article class="card">
+          <h2>Key Metrics</h2>
+          <div id="metrics" class="metrics-grid"></div>
+        </article>
+
+        <article class="card">
+          <h2>Top Keywords</h2>
+          <div id="keywords" class="chips"></div>
+        </article>
+
+        <article class="card">
+          <h2>Checks</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Check</th>
+                  <th>Status</th>
+                  <th>Points</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="checks-body"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+﻿{
+  "name": "on-page-seo-analyzer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A lightweight on-page SEO analyzer for public URLs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
