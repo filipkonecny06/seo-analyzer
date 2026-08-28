@@ -1,60 +1,235 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Audit on-page SEO signals and turn technical findings into a prioritized action plan."
+    />
+    <meta name="theme-color" content="#07111f" />
     <title>On-Page SEO Analyzer</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="page">
-      <section class="hero card">
-        <h1>On-Page SEO Analyzer</h1>
-        <p>Analyze any public page URL and get an SEO quality score with targeted recommendations.</p>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
 
-        <form id="analyzer-form" class="form" autocomplete="off">
-          <label for="url-input">URL</label>
-          <div class="row">
-            <input id="url-input" name="url" placeholder="https://example.com/blog-post" required />
-            <button id="analyze-btn" type="submit">Analyze</button>
+    <header class="site-header">
+      <div class="site-header__inner page-shell">
+        <a class="brand" href="/" aria-label="On-Page SEO Analyzer home">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" focusable="false">
+              <path d="M8 23V15m8 8V9m8 14V5" />
+              <path d="m5 11 7-5 6 3 9-6" />
+            </svg>
+          </span>
+          <span class="brand__name">SEO Analyzer</span>
+        </a>
+        <span class="site-header__tagline">Fast, focused page audits</span>
+      </div>
+    </header>
+
+    <main id="main-content" class="main-content page-shell">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__copy">
+          <p class="eyebrow">Technical SEO, made actionable</p>
+          <h1 id="hero-title">See what search engines see.</h1>
+          <p class="hero__lede">
+            Run an on-page audit in seconds. Get a clear score, inspect essential signals, and leave
+            with a prioritized list of improvements.
+          </p>
+          <ul class="hero__benefits" aria-label="Analyzer features">
+            <li>
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="m4 10 4 4 8-8" />
+              </svg>
+              100-point quality score
+            </li>
+            <li>
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="m4 10 4 4 8-8" />
+              </svg>
+              Prioritized recommendations
+            </li>
+            <li>
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="m4 10 4 4 8-8" />
+              </svg>
+              No signup required
+            </li>
+          </ul>
+        </div>
+
+        <div id="analyzer-panel" class="analyzer-card" aria-busy="false">
+          <div class="analyzer-card__header">
+            <span class="analyzer-card__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <circle cx="11" cy="11" r="6" />
+                <path d="m16 16 4 4M11 8v6m-3-3h6" />
+              </svg>
+            </span>
+            <div>
+              <h2>Analyze a page</h2>
+              <p>Enter a public URL to generate a report.</p>
+            </div>
           </div>
-        </form>
 
-        <p id="status" class="status"></p>
+          <form id="analyzer-form" class="analyzer-form" novalidate>
+            <div class="field">
+              <label class="field__label" for="url-input">Page URL</label>
+              <div class="field__control">
+                <svg
+                  class="field__leading-icon"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M3 12h18M12 3c3 3.4 3 14.6 0 18M12 3c-3 3.4-3 14.6 0 18" />
+                </svg>
+                <input
+                  id="url-input"
+                  class="field__input"
+                  name="url"
+                  type="text"
+                  inputmode="url"
+                  autocomplete="url"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  placeholder="example.com/article"
+                  aria-describedby="url-hint"
+                  required
+                />
+              </div>
+              <p id="url-hint" class="field__hint">HTTP and HTTPS pages are supported.</p>
+            </div>
+
+            <button id="analyze-button" class="button button--primary" type="submit">
+              <span class="button__label">Analyze page</span>
+              <span class="button__spinner" aria-hidden="true"></span>
+              <svg class="button__arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="M4 10h12m-5-5 5 5-5 5" />
+              </svg>
+            </button>
+          </form>
+
+          <div class="feedback" aria-atomic="true">
+            <p id="status" class="feedback__status" role="status" aria-live="polite"></p>
+            <p
+              id="error-message"
+              class="feedback__error"
+              role="alert"
+              aria-live="assertive"
+              tabindex="-1"
+              hidden
+            ></p>
+          </div>
+        </div>
       </section>
 
-      <section id="result" class="result hidden">
-        <article class="card score-card">
-          <h2>SEO Score</h2>
-          <p id="score-value" class="score-value"></p>
-          <p id="score-meta" class="muted"></p>
+      <section id="report" class="report" aria-labelledby="report-title" aria-busy="false" hidden>
+        <article class="report-summary card">
+          <div class="report-summary__heading">
+            <p class="eyebrow">Analysis report</p>
+            <h2 id="report-title" tabindex="-1">SEO health at a glance</h2>
+            <p class="report-summary__url">
+              <span>Analyzed</span>
+              <a id="analyzed-url" rel="noopener noreferrer" target="_blank"></a>
+            </p>
+            <p id="fetched-at" class="report-summary__time"></p>
+          </div>
+
+          <div class="score-block">
+            <div id="score-dial" class="score-dial" role="img">
+              <div class="score-dial__inner">
+                <strong id="score-value" class="score-dial__value">0</strong>
+                <span>out of 100</span>
+              </div>
+            </div>
+            <div class="score-block__copy">
+              <span id="score-grade" class="grade-badge"></span>
+              <p id="score-message"></p>
+            </div>
+          </div>
         </article>
 
-        <article class="card">
-          <h2>Top Recommendations</h2>
-          <ul id="recommendations" class="plain-list"></ul>
-        </article>
+        <div class="report-grid">
+          <article class="card card--recommendations">
+            <div class="section-heading">
+              <span class="section-heading__icon section-heading__icon--accent" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M9 18h6m-5 3h4" />
+                  <path d="M8.5 15.5a7 7 0 1 1 7 0c-.9.7-1.5 1.5-1.5 2.5h-4c0-1-.6-1.8-1.5-2.5Z" />
+                </svg>
+              </span>
+              <div>
+                <h3>Priority actions</h3>
+                <p>Start with the changes that matter most.</p>
+              </div>
+            </div>
+            <ol id="recommendations" class="recommendation-list"></ol>
+          </article>
+
+          <article class="card card--metrics">
+            <div class="section-heading">
+              <span class="section-heading__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M4 20V10m6 10V4m6 16v-7m4 7H2" />
+                </svg>
+              </span>
+              <div>
+                <h3>Key metrics</h3>
+                <p>A snapshot of essential page signals.</p>
+              </div>
+            </div>
+            <dl id="metrics" class="metrics-grid"></dl>
+          </article>
+        </div>
 
         <article class="card">
-          <h2>Key Metrics</h2>
-          <div id="metrics" class="metrics-grid"></div>
+          <div class="section-heading section-heading--split">
+            <div class="section-heading__group">
+              <span class="section-heading__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M4 7h16M4 12h10M4 17h7" />
+                </svg>
+              </span>
+              <div>
+                <h3>Top keywords</h3>
+                <p>Frequently used terms after common words are removed.</p>
+              </div>
+            </div>
+          </div>
+          <div id="keywords" class="keyword-list"></div>
         </article>
 
-        <article class="card">
-          <h2>Top Keywords</h2>
-          <div id="keywords" class="chips"></div>
-        </article>
+        <article class="card card--checks">
+          <div class="section-heading section-heading--split">
+            <div class="section-heading__group">
+              <span class="section-heading__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M9 6h11M9 12h11M9 18h11" />
+                  <path d="m3.5 6 1 1 2-2m-3 7 1 1 2-2m-3 7 1 1 2-2" />
+                </svg>
+              </span>
+              <div>
+                <h3>Detailed checks</h3>
+                <p id="checks-summary">A rule-by-rule breakdown of this page.</p>
+              </div>
+            </div>
+          </div>
 
-        <article class="card">
-          <h2>Checks</h2>
-          <div class="table-wrap">
-            <table>
+          <div class="table-wrap" tabindex="0" role="region" aria-label="Detailed SEO checks table">
+            <table class="checks-table">
+              <caption>
+                On-page SEO checks, their status, awarded points, and supporting details
+              </caption>
               <thead>
                 <tr>
-                  <th>Check</th>
-                  <th>Status</th>
-                  <th>Points</th>
-                  <th>Details</th>
+                  <th scope="col">Check</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Points</th>
+                  <th scope="col">Details</th>
                 </tr>
               </thead>
               <tbody id="checks-body"></tbody>
@@ -64,6 +239,13 @@
       </section>
     </main>
 
-    <script src="/app.js"></script>
+    <footer class="site-footer page-shell">
+      <p>Built to turn page signals into a practical SEO checklist.</p>
+    </footer>
+
+    <noscript>
+      <div class="noscript-message">JavaScript is required to run an SEO analysis.</div>
+    </noscript>
+    <script src="/app.js" defer></script>
   </body>
 </html>
