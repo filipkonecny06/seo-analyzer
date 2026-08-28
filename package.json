@@ -1,13 +1,30 @@
 ﻿{
   "name": "on-page-seo-analyzer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "A lightweight on-page SEO analyzer for public URLs",
+  "description": "A security-conscious, extensible on-page SEO analyzer for public URLs",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "test": "node --test",
+    "test:coverage": "c8 --check-coverage --lines 80 --functions 80 --branches 70 node --test",
+    "check": "npm run lint && npm run format:check && npm run test:coverage"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "dependencies": {
+    "cheerio": "^1.2.0",
+    "ipaddr.js": "^2.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "c8": "^12.0.0",
+    "eslint": "^10.9.1",
+    "globals": "^17.11.0",
+    "prettier": "^3.9.6"
   }
 }
