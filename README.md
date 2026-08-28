@@ -6,6 +6,11 @@
 A Node.js application that fetches one public HTML page and reports common on-page SEO signals. Its
 100-point score is a review aid backed by visible checks and evidence, not a search-ranking forecast.
 
+## Demo access
+
+No credentials are required. The analyzer is intentionally available without an account: run it
+locally (or open its deployed URL), enter a public HTTP(S) page URL, and start an analysis.
+
 ## Highlights
 
 - Standards-based HTML parsing with Cheerio instead of regular expressions
