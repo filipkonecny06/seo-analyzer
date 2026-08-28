@@ -5,9 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Jobs only need repository contents; checkout also avoids retaining its temporary credential.
 permissions:
   contents: read
 
+# New commits supersede older runs for the same branch or pull request.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,11 +19,13 @@ jobs:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Exercise every Node major declared in package.json rather than testing only the newest runtime.
     strategy:
       fail-fast: false
       matrix:
         node-version: ['22', '24']
     steps:
+      # Commit SHAs make third-party action updates explicit; comments retain the readable release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -46,6 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Loopback-only publishing keeps the CI probe unreachable from external network interfaces.
           container_id="$(docker run --detach --env PORT=3102 --publish 127.0.0.1:3102:3102 seo-analyzer:test)"
 
           cleanup() {

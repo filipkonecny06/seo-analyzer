@@ -1,7 +1,14 @@
+// Coordinates form state, cancellable API requests, and accessible report presentation.
+
 import { ReportRenderer } from './report-renderer.mjs';
 import { displayNumber, getRequiredElement, isRecord } from './ui-utils.mjs';
 
+/** User-facing request failure with enough context to mark invalid input accessibly. */
 export class AnalysisRequestError extends Error {
+  /**
+   * @param {string} message
+   * @param {boolean} [invalidInput]
+   */
   constructor(message, invalidInput = false) {
     super(message);
     this.name = 'AnalysisRequestError';
@@ -9,6 +16,7 @@ export class AnalysisRequestError extends Error {
   }
 }
 
+/** Thin transport adapter for the analyzer's JSON endpoint. */
 export class AnalysisApiClient {
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
@@ -19,6 +27,14 @@ export class AnalysisApiClient {
     }
   }
 
+  /**
+   * Requests and validates the server's response envelope.
+   *
+   * @param {string} rawUrl
+   * @param {AbortSignal} signal
+   * @returns {Promise<object>}
+   * @throws {AnalysisRequestError} For response-contract errors; network and abort errors propagate.
+   */
   async fetchReport(rawUrl, signal) {
     const response = await this.fetchImpl(`${this.endpoint}?url=${encodeURIComponent(rawUrl)}`, {
       method: 'GET',
@@ -53,7 +69,12 @@ export class AnalysisApiClient {
   }
 }
 
+/** Owns the analyzer form lifecycle and ensures only the newest request may update the page. */
 export class AnalyzerApp {
+  /**
+   * @param {Document} rootDocument
+   * @param {object} [options] Browser API and collaborator overrides used by tests.
+   */
   constructor(rootDocument, options = {}) {
     this.document = rootDocument;
     this.window = options.window || rootDocument.defaultView;
@@ -78,6 +99,7 @@ export class AnalyzerApp {
     this.handleBeforeUnload = this.handleBeforeUnload.bind(this);
   }
 
+  /** Attaches event listeners once and returns this application instance. */
   init() {
     if (this.initialized) return this;
 
@@ -88,6 +110,7 @@ export class AnalyzerApp {
     return this;
   }
 
+  /** Removes listeners and cancels work so a detached application cannot update the document. */
   destroy() {
     if (!this.initialized) return;
 
@@ -109,6 +132,7 @@ export class AnalyzerApp {
     this.abortActiveRequest();
   }
 
+  /** Validates input, runs one cancellable analysis, and renders its latest result. */
   async handleSubmit(event) {
     event.preventDefault();
 
@@ -127,6 +151,7 @@ export class AnalyzerApp {
     }
 
     this.abortActiveRequest();
+    // The sequence guards against stale completions even if a fetch implementation ignores abort.
     const requestId = ++this.requestSequence;
     const controller = this.createAbortController();
     this.activeRequest = { id: requestId, controller };
@@ -151,6 +176,7 @@ export class AnalyzerApp {
       this.setStatus(
         `Analysis complete. SEO score: ${displayNumber(payload.report.score)} out of 100.`
       );
+      // Move focus after rendering so keyboard and screen-reader users land on the new report.
       this.schedule(() => {
         if (this.requestSequence === requestId) this.renderer.focus();
       });
@@ -170,6 +196,12 @@ export class AnalyzerApp {
     }
   }
 
+  /**
+   * Performs immediate syntax feedback; the server remains authoritative for network safety.
+   *
+   * @param {string} rawUrl
+   * @returns {string} An empty string when valid, otherwise a user-facing validation message.
+   */
   validateUrl(rawUrl) {
     if (!rawUrl) return 'Enter a page URL to begin the analysis.';
 
@@ -187,6 +219,7 @@ export class AnalyzerApp {
     return '';
   }
 
+  /** Cancels the current network request, if any, and clears its ownership marker. */
   abortActiveRequest() {
     if (this.activeRequest) {
       this.activeRequest.controller.abort();
@@ -194,6 +227,7 @@ export class AnalyzerApp {
     }
   }
 
+  /** Returns whether a completion still belongs to the active submission. */
   isCurrentRequest(requestId) {
     return this.activeRequest !== null && this.activeRequest.id === requestId;
   }

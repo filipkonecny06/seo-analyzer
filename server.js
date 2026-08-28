@@ -1,8 +1,17 @@
 'use strict';
 
+// Process entry point: load validated configuration, start the HTTP server, and own shutdown.
+
 const { loadConfig } = require('./src/config');
 const { createServer } = require('./src/http/create-server');
 
+/**
+ * Creates the small structured logger used by the process boundary.
+ * Error output is intentionally allowlisted so request context is retained without serializing
+ * arbitrary error fields that could contain response data or other sensitive values.
+ *
+ * @returns {{info(fields: object): void, error(fields: object): void}}
+ */
 function createLogger() {
   return {
     info(fields) {
@@ -25,6 +34,11 @@ function createLogger() {
   };
 }
 
+/**
+ * Starts the configured HTTP server and registers one-shot process signal handlers.
+ *
+ * @returns {import('node:http').Server} The listening server, exposed for tests and embedders.
+ */
 function start() {
   const config = loadConfig();
   const logger = createLogger();
@@ -39,6 +53,7 @@ function start() {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ event: 'server.stopping', signal });
+    // A deadline keeps orchestrators from waiting forever on stalled open connections.
     const forceTimer = setTimeout(() => process.exit(1), 10_000);
     forceTimer.unref();
     server.close((error) => {

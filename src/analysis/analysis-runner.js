@@ -1,5 +1,7 @@
 'use strict';
 
+// Runs CPU- and parser-heavy analysis either inline for tests or in a bounded worker for production.
+
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 const { AnalysisExecutionError } = require('../errors');
@@ -12,6 +14,12 @@ function abortError(signal) {
   });
 }
 
+/**
+ * Adapts a synchronous analyzer to the async runner contract for deterministic unit tests.
+ *
+ * @param {{analyze(pageUrl: string, html: string|Buffer, options?: object): object}} analyzer
+ * @returns {{analyze(pageUrl: string, html: string|Buffer, options?: object): Promise<object>}}
+ */
 function createInlineAnalysisRunner(analyzer) {
   return {
     async analyze(pageUrl, html, options = {}) {
@@ -21,6 +29,10 @@ function createInlineAnalysisRunner(analyzer) {
   };
 }
 
+/**
+ * Isolates HTML parsing in a worker with memory, stack, time, and cancellation limits.
+ * A fresh worker per report also prevents malformed pages from retaining state between requests.
+ */
 class WorkerAnalysisRunner {
   constructor(options = {}) {
     this.timeoutMs = options.timeoutMs || 5000;
@@ -40,6 +52,14 @@ class WorkerAnalysisRunner {
     this.timers = options.timers || { setTimeout, clearTimeout };
   }
 
+  /**
+   * Starts one isolated analysis and terminates its worker on every completion path.
+   *
+   * @param {string} pageUrl
+   * @param {string|Buffer} html
+   * @param {{responseHeaders?: object, signal?: AbortSignal}} [options]
+   * @returns {Promise<object>}
+   */
   analyze(pageUrl, html, options = {}) {
     if (options.signal?.aborted) return Promise.reject(abortError(options.signal));
 
@@ -71,6 +91,7 @@ class WorkerAnalysisRunner {
         worker.removeListener('exit', handleExit);
       };
 
+      // Wait for the termination attempt before settling so worker cleanup precedes the outcome.
       const settleAfterTermination = (error, report) => {
         if (settled) return;
         settled = true;
@@ -82,6 +103,7 @@ class WorkerAnalysisRunner {
         } catch (_terminationError) {
           termination = undefined;
         }
+        // Worker termination errors cannot change the already selected analysis outcome.
         Promise.resolve(termination)
           .catch(() => undefined)
           .then(() => {
@@ -92,6 +114,7 @@ class WorkerAnalysisRunner {
 
       const handleAbort = () => settleAfterTermination(abortError(options.signal));
       const handleMessage = (message) => {
+        // Treat worker messages as a serialized boundary and require the expected envelope.
         if (message?.ok === true && message.report && typeof message.report === 'object') {
           settleAfterTermination(null, message.report);
           return;

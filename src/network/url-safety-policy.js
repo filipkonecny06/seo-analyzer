@@ -1,5 +1,7 @@
 'use strict';
 
+// Validates outbound targets and resolves them without permitting access to private networks.
+
 const dns = require('node:dns/promises');
 const net = require('node:net');
 const ipaddr = require('ipaddr.js');
@@ -13,6 +15,13 @@ function stripIpv6Brackets(hostname) {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
 
+/**
+ * Canonicalizes an IPv4 or IPv6 address for consistent policy checks and connection pinning.
+ *
+ * @param {string} address
+ * @returns {{address: string, family: 4|6, range: string}}
+ * @throws {UrlPolicyError} When the supplied address is invalid.
+ */
 function normalizeAddress(address) {
   try {
     const parsed = ipaddr.process(stripIpv6Brackets(String(address).trim()));
@@ -29,6 +38,12 @@ function normalizeAddress(address) {
   }
 }
 
+/**
+ * Rejects loopback, private, link-local, multicast, and other non-unicast destinations.
+ *
+ * @param {string} address
+ * @returns {{address: string, family: 4|6, range: string}}
+ */
 function assertPublicAddress(address) {
   const normalized = normalizeAddress(address);
   if (normalized.range !== 'unicast') {
@@ -62,6 +77,10 @@ async function resolveAddressFamily(resolver, method, hostname, family) {
   }
 }
 
+/**
+ * Enforces the URL and DNS portion of the server-side request-forgery boundary.
+ * Authorization returns a concrete address that callers must pin to the outbound connection.
+ */
 class UrlSafetyPolicy {
   constructor(options = {}) {
     this.resolverFactory = options.resolverFactory || createDefaultResolver;
@@ -71,6 +90,13 @@ class UrlSafetyPolicy {
     this.timers = options.timers || { setTimeout, clearTimeout };
   }
 
+  /**
+   * Normalizes a user target and enforces protocol, credential, port, and hostname rules.
+   *
+   * @param {string|URL} input
+   * @returns {URL}
+   * @throws {UrlPolicyError} When the target is syntactically invalid or disallowed.
+   */
   normalize(input) {
     const raw = input instanceof URL ? input.toString() : String(input || '').trim();
     if (!raw) {
@@ -132,6 +158,15 @@ class UrlSafetyPolicy {
     return url;
   }
 
+  /**
+   * Resolves a normalized target and verifies that every returned address is public.
+   * Rejecting a mixed public/private answer prevents a resolver from hiding an internal target
+   * among otherwise acceptable records.
+   *
+   * @param {string|URL} input
+   * @param {{signal?: AbortSignal}} [options]
+   * @returns {Promise<{url: URL, addresses: object[], selectedAddress: object}>}
+   */
   async authorize(input, options = {}) {
     if (options.signal?.aborted) throw signalReason(options.signal);
     const url = this.normalize(input);
@@ -154,10 +189,18 @@ class UrlSafetyPolicy {
     const unique = [
       ...new Map(resolved.map((entry) => [`${entry.family}:${entry.address}`, entry])).values()
     ];
+    // Prefer IPv4 for broad host compatibility while retaining an IPv6-only fallback.
     const selectedAddress = unique.find((entry) => entry.family === 4) || unique[0];
     return { url, addresses: unique, selectedAddress };
   }
 
+  /**
+   * Resolves both address families under one timeout and cancellation lifecycle.
+   *
+   * @param {string} hostname
+   * @param {{signal?: AbortSignal}} [options]
+   * @returns {Promise<Array<{address: string, family: 4|6}>>}
+   */
   async resolveWithTimeout(hostname, options = {}) {
     if (options.signal?.aborted) throw signalReason(options.signal);
 
@@ -210,6 +253,7 @@ class UrlSafetyPolicy {
         }
 
         if (settled) return;
+        // The families are independent; resolving them concurrently avoids doubling DNS latency.
         Promise.all([
           resolveAddressFamily(resolver, 'resolve4', hostname, 4),
           resolveAddressFamily(resolver, 'resolve6', hostname, 6)
@@ -234,6 +278,14 @@ class UrlSafetyPolicy {
     }
   }
 
+  /**
+   * Builds a Node-compatible lookup callback that always returns the authorized address.
+   * Keeping the original URL hostname for HTTP Host/TLS SNI while pinning the socket address closes
+   * the DNS-rebinding gap between policy validation and connection establishment.
+   *
+   * @param {{address: string, family: 4|6}} selectedAddress
+   * @returns {Function}
+   */
   createPinnedLookup(selectedAddress) {
     return (_hostname, options, callback) => {
       let lookupOptions = options;

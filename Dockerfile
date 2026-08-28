@@ -1,9 +1,11 @@
+# Install with --omit=dev in a cacheable stage so development tooling is not shipped.
 FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+# Digests make base-image changes explicit and reproducible during dependency review.
 FROM node:24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf AS runtime
 
 ENV NODE_ENV=production \
@@ -14,6 +16,7 @@ ENV NODE_ENV=production \
     ANALYSIS_MAX_YOUNG_SPACE_MB=16 \
     ANALYSIS_STACK_SIZE_MB=4
 
+# Create and run as a dedicated user so the application never needs root privileges.
 WORKDIR /app
 RUN addgroup -S app && adduser -S -G app app
 
@@ -24,6 +27,7 @@ COPY --chown=app:app src ./src
 
 USER app
 EXPOSE 3000
+# Honor the configured port so the same image can be probed in local and hosted environments.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget -q -O - "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null || exit 1
 

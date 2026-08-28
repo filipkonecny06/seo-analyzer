@@ -1,5 +1,7 @@
 'use strict';
 
+// HTTP composition root: routes requests, serves static assets, and wires security dependencies.
+
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -22,6 +24,7 @@ const MIME_TYPES = Object.freeze({
   '.txt': 'text/plain; charset=utf-8'
 });
 
+// The browser UI is self-contained, so a restrictive policy needs no third-party exceptions.
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
@@ -36,6 +39,7 @@ const CONTENT_SECURITY_POLICY = [
 ].join('; ');
 
 function setCommonHeaders(response, requestId) {
+  // These headers establish the baseline for every response, including errors and static files.
   response.setHeader('content-security-policy', CONTENT_SECURITY_POLICY);
   response.setHeader('cross-origin-opener-policy', 'same-origin');
   response.setHeader('permissions-policy', 'camera=(), geolocation=(), microphone=()');
@@ -75,6 +79,14 @@ function methodNotAllowed(request, response, allowedMethods) {
   );
 }
 
+/**
+ * Resolves a URL path inside the public directory after rejecting ambiguous path encodings.
+ *
+ * @param {string} publicDirectory
+ * @param {string} pathname
+ * @returns {string}
+ * @throws {AppError} When the path is malformed or escapes the public directory.
+ */
 function resolveStaticPath(publicDirectory, pathname) {
   let decoded;
   try {
@@ -112,6 +124,14 @@ function resolveStaticPath(publicDirectory, pathname) {
   return filePath;
 }
 
+/**
+ * Selects the rate-limit identity for a request.
+ * Forwarded addresses are trusted only when the operator explicitly enables proxy trust.
+ *
+ * @param {import('node:http').IncomingMessage} request
+ * @param {boolean} trustProxy
+ * @returns {string}
+ */
 function getClientAddress(request, trustProxy) {
   if (trustProxy) {
     const forwarded = String(request.headers['x-forwarded-for'] || '')
@@ -123,6 +143,7 @@ function getClientAddress(request, trustProxy) {
 }
 
 function createDependencies(config, overrides) {
+  // Constructor overrides keep unit tests deterministic without changing production composition.
   const urlSafetyPolicy =
     overrides.urlSafetyPolicy ||
     new UrlSafetyPolicy({
@@ -157,6 +178,13 @@ function createDependencies(config, overrides) {
   };
 }
 
+/**
+ * Creates the application server without listening, allowing the process entry point to own ports
+ * and shutdown while tests can bind ephemeral ports.
+ *
+ * @param {object} [options] Validated config and optional dependency overrides.
+ * @returns {import('node:http').Server}
+ */
 function createServer(options = {}) {
   const config = options.config || loadConfig();
   const publicDirectory = options.publicDirectory || path.resolve(__dirname, '../../public');
@@ -168,6 +196,7 @@ function createServer(options = {}) {
     const requestId = crypto.randomUUID();
     setCommonHeaders(response, requestId);
 
+    // Start one promise chain per request so async routing failures reach the central handler.
     Promise.resolve()
       .then(async () => {
         let requestUrl;
@@ -201,6 +230,7 @@ function createServer(options = {}) {
             return;
           }
 
+          // Rate limiting precedes validation so malformed requests still consume client allowance.
           const rate = dependencies.rateLimiter.consume(
             getClientAddress(request, config.trustProxy)
           );
@@ -229,6 +259,7 @@ function createServer(options = {}) {
             return;
           }
 
+          // Reject at capacity instead of retaining incoming requests in an unbounded queue.
           const release = dependencies.concurrencyGate.tryAcquire();
           if (!release) {
             sendJson(
@@ -247,6 +278,7 @@ function createServer(options = {}) {
             return;
           }
 
+          // A disconnected client no longer needs network or worker resources, so cancel both layers.
           const clientAbortController = new AbortController();
           const abortClientRequest = () => {
             if (!clientAbortController.signal.aborted) clientAbortController.abort();
@@ -274,6 +306,7 @@ function createServer(options = {}) {
               report
             });
           } finally {
+            // The slot and listeners must be released on success, failure, and cancellation alike.
             request.removeListener('aborted', abortClientRequest);
             response.removeListener('close', abortClosedResponse);
             release();
@@ -319,6 +352,7 @@ function createServer(options = {}) {
         sendBuffer(request, response, 200, body, contentType, { 'cache-control': 'no-cache' });
       })
       .catch((error) => {
+        // Once bytes have been sent, destroying the stream is safer than attempting a second reply.
         if (response.headersSent || response.destroyed || response.writableEnded) {
           response.destroy();
           return;
@@ -333,6 +367,7 @@ function createServer(options = {}) {
       });
   });
 
+  // Bound header and request lifetimes independently to reduce slow-client resource retention.
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = Math.min(config.requestTimeoutMs, 10_000);
   server.keepAliveTimeout = 5000;

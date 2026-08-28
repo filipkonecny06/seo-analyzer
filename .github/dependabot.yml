@@ -1,5 +1,6 @@
 version: 2
 updates:
+  # Group related npm updates so runtime and tooling changes remain independently reviewable.
   - package-ecosystem: npm
     directory: /
     schedule:

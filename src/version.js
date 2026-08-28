@@ -1,5 +1,7 @@
 'use strict';
 
+// Centralizes application and methodology versions for reports, health checks, and outbound identity.
+
 const { version: APPLICATION_VERSION } = require('../package.json');
 
 const METHODOLOGY_VERSION = '2.0';

@@ -1,5 +1,7 @@
 'use strict';
 
+// Parses untrusted HTML once into the immutable evidence consumed by every scoring rule.
+
 const cheerio = require('cheerio');
 
 const ENGLISH_STOP_WORDS = new Set([
@@ -60,6 +62,12 @@ const ENGLISH_STOP_WORDS = new Set([
   'your'
 ]);
 
+/**
+ * Collapses HTML-style whitespace for stable metadata and text comparisons.
+ *
+ * @param {*} value
+ * @returns {string}
+ */
 function normalizeWhitespace(value) {
   return String(value || '')
     .replace(/\s+/gu, ' ')
@@ -116,6 +124,7 @@ function findCanonical($, pageUrl) {
 }
 
 function collectStructuredDataTypes(value, types = new Set()) {
+  // JSON-LD entities may be nested or stored in @graph, so inspect the complete object tree.
   if (Array.isArray(value)) {
     value.forEach((entry) => collectStructuredDataTypes(entry, types));
     return types;
@@ -168,6 +177,13 @@ function extractStructuredData($) {
   return result;
 }
 
+/**
+ * Converts visible text into Unicode-aware word tokens.
+ * NFKC normalization makes compatibility forms comparable without restricting non-Latin scripts.
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
 function tokenize(text) {
   return (
     text
@@ -177,6 +193,14 @@ function tokenize(text) {
   );
 }
 
+/**
+ * Returns the ten most frequent meaningful terms with deterministic alphabetical tie-breaking.
+ * Short CJK and Hangul tokens are retained because length heuristics designed for Latin words would
+ * otherwise remove useful terms from those writing systems.
+ *
+ * @param {string[]} tokens
+ * @returns {Array<{term: string, count: number}>}
+ */
 function extractTopKeywords(tokens) {
   const frequency = new Map();
   for (const token of tokens) {
@@ -193,6 +217,7 @@ function extractTopKeywords(tokens) {
 }
 
 function extractVisibleText($) {
+  // Exclude script, style, and template containers from the primary body-text word count.
   const content = ($('body').length ? $('body') : $.root()).clone();
   content.find('script, style, noscript, template, svg').remove();
   return normalizeWhitespace(content.text());
@@ -204,7 +229,16 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
+/**
+ * Immutable, presentation-independent representation of the SEO signals in one HTML document.
+ * Construction performs parsing only; it has no network, database, or DOM side effects.
+ */
 class PageSnapshot {
+  /**
+   * @param {string} pageUrl
+   * @param {string|Buffer} html
+   * @param {{responseHeaders?: object}} [options]
+   */
   constructor(pageUrl, html, options = {}) {
     this.pageUrl = new URL(pageUrl).href;
     const $ = loadHtml(html);
@@ -288,6 +322,7 @@ class PageSnapshot {
       structuredDataCount: structuredData.total
     });
 
+    // Rules can safely share this object because no evaluation is allowed to alter later evidence.
     deepFreeze(this);
   }
 }

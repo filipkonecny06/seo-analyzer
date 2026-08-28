@@ -1,6 +1,9 @@
 'use strict';
 
+// Defines the transparent, independently testable rules behind the 100-point SEO score.
+
 function result(rule, options) {
+  // Finite built-in proportional scores become integers inside the rule's advertised weight.
   const points = Math.max(0, Math.min(rule.maxPoints, Math.round(options.points)));
   return {
     id: rule.id,
@@ -13,6 +16,7 @@ function result(rule, options) {
   };
 }
 
+/** Base contract implemented by every scoring rule. */
 class AnalysisRule {
   constructor({ id, label, maxPoints }) {
     this.id = id;
@@ -20,11 +24,17 @@ class AnalysisRule {
     this.maxPoints = maxPoints;
   }
 
+  /**
+   * Evaluates one PageSnapshot.
+   *
+   * @returns {{id: string, label: string, maxPoints: number, points: number, status: string, detail: string, recommendation?: string}}
+   */
   evaluate() {
     throw new Error(`${this.constructor.name} must implement evaluate().`);
   }
 }
 
+/** Scores the presence and search-result-friendly length of the document title. */
 class TitleRule extends AnalysisRule {
   constructor() {
     super({ id: 'title', label: 'Title tag', maxPoints: 15 });
@@ -57,6 +67,7 @@ class TitleRule extends AnalysisRule {
   }
 }
 
+/** Scores the presence and likely snippet length of the meta description. */
 class MetaDescriptionRule extends AnalysisRule {
   constructor() {
     super({ id: 'description', label: 'Meta description', maxPoints: 15 });
@@ -89,6 +100,7 @@ class MetaDescriptionRule extends AnalysisRule {
   }
 }
 
+/** Scores whether the document exposes a clear H1 and sequential heading outline. */
 class HeadingRule extends AnalysisRule {
   constructor() {
     super({ id: 'headings', label: 'Heading structure', maxPoints: 10 });
@@ -126,6 +138,7 @@ class HeadingRule extends AnalysisRule {
   }
 }
 
+/** Scores explicit alt-attribute coverage while allowing empty alt text for decorative images. */
 class ImageAltRule extends AnalysisRule {
   constructor() {
     super({ id: 'images', label: 'Image alternatives', maxPoints: 10 });
@@ -158,6 +171,7 @@ class ImageAltRule extends AnalysisRule {
   }
 }
 
+/** Scores the presence and HTTP(S) validity of the preferred canonical URL. */
 class CanonicalRule extends AnalysisRule {
   constructor() {
     super({ id: 'canonical', label: 'Canonical URL', maxPoints: 10 });
@@ -203,6 +217,7 @@ const PARAMETERIZED_ROBOTS_DIRECTIVES = new Set([
 ]);
 
 function addXRobotsTagDirectives(directives, value) {
+  // X-Robots-Tag may scope subsequent comma-separated directives to a named crawler.
   let appliesToGooglebot = true;
 
   String(value || '')
@@ -223,6 +238,13 @@ function addXRobotsTagDirectives(directives, value) {
     });
 }
 
+/**
+ * Combines HTML and repeated HTTP indexing directives into the policy relevant to Googlebot.
+ * The shorthand "none" expands to its defined noindex/nofollow behavior.
+ *
+ * @param {import('./page-snapshot').PageSnapshot} snapshot
+ * @returns {Set<string>}
+ */
 function parseRobotsDirectives(snapshot) {
   const directives = new Set();
   addDirectiveTokens(directives, snapshot.metadata.robots);
@@ -239,6 +261,7 @@ function parseRobotsDirectives(snapshot) {
   return directives;
 }
 
+/** Scores whether page-level metadata permits indexing and link discovery. */
 class RobotsRule extends AnalysisRule {
   constructor() {
     super({ id: 'robots', label: 'Indexing directives', maxPoints: 10 });
@@ -272,6 +295,7 @@ class RobotsRule extends AnalysisRule {
   }
 }
 
+/** Uses visible word count as a review signal, not as a claim about content quality. */
 class ContentDepthRule extends AnalysisRule {
   constructor() {
     super({ id: 'content', label: 'Content depth', maxPoints: 10 });
@@ -305,6 +329,7 @@ class ContentDepthRule extends AnalysisRule {
   }
 }
 
+/** Scores the baseline viewport declaration required for responsive layouts. */
 class ViewportRule extends AnalysisRule {
   constructor() {
     super({ id: 'viewport', label: 'Mobile viewport', maxPoints: 5 });
@@ -336,6 +361,7 @@ class ViewportRule extends AnalysisRule {
   }
 }
 
+/** Checks for a plausible BCP 47 document-language declaration. */
 class LanguageRule extends AnalysisRule {
   constructor() {
     super({ id: 'lang', label: 'Document language', maxPoints: 5 });
@@ -366,6 +392,7 @@ class LanguageRule extends AnalysisRule {
   }
 }
 
+/** Scores the three baseline fields needed for dependable social previews. */
 class OpenGraphRule extends AnalysisRule {
   constructor() {
     super({ id: 'open-graph', label: 'Open Graph metadata', maxPoints: 5 });
@@ -390,6 +417,7 @@ class OpenGraphRule extends AnalysisRule {
   }
 }
 
+/** Scores parseable JSON-LD blocks that contain at least one non-empty @type. */
 class StructuredDataRule extends AnalysisRule {
   constructor() {
     super({ id: 'structured-data', label: 'Structured data', maxPoints: 5 });
@@ -448,6 +476,7 @@ class StructuredDataRule extends AnalysisRule {
   }
 }
 
+// The individual weights are deliberately visible here and validated to total 100 by SeoAnalyzer.
 const DEFAULT_RULES = Object.freeze([
   new TitleRule(),
   new MetaDescriptionRule(),

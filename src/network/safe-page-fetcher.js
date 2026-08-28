@@ -1,5 +1,7 @@
 'use strict';
 
+// Fetches public HTML through an authorized, pinned address with strict resource bounds.
+
 const http = require('node:http');
 const https = require('node:https');
 const { PageFetchError } = require('../errors');
@@ -11,6 +13,14 @@ function firstHeaderValue(value) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+/**
+ * Preserves repeated response-header fields when Node exposes either joined or distinct values.
+ *
+ * @param {object} headers
+ * @param {object} headerValues
+ * @param {string} name
+ * @returns {string[]}
+ */
 function distinctHeaderValues(headers, headerValues, name) {
   const distinct = headerValues?.[name];
   const values = Array.isArray(distinct)
@@ -33,6 +43,7 @@ function abortError(signal) {
 }
 
 function createFetchSignal(externalSignal, timeoutMs, timers) {
+  // One internal signal gives timeout and caller cancellation the same cleanup path.
   const controller = new AbortController();
   const forwardAbort = () => controller.abort(externalSignal.reason);
 
@@ -63,6 +74,13 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal);
 }
 
+/**
+ * Performs one HTTP request using the address selected by UrlSafetyPolicy.
+ * The promise has exactly one completion path and destroys sockets/streams on cancellation.
+ *
+ * @param {object} options Authorized URL, pinned lookup, limits, headers, and optional signal.
+ * @returns {Promise<{statusCode: number, headers: object, headerValues: object, body: Buffer}>}
+ */
 function requestPinned(options) {
   const { url, selectedAddress, lookup, headers, timeoutMs, maxResponseBytes } = options;
   const transport = url.protocol === 'https:' ? https : http;
@@ -88,6 +106,7 @@ function requestPinned(options) {
       }, timeoutMs);
     }
 
+    // Response, abort, timeout, and socket events can race; only the first may settle the request.
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -110,6 +129,7 @@ function requestPinned(options) {
 
     request = transport.request(url, {
       method: 'GET',
+      // A one-off agent prevents connection reuse from bypassing this request's pinned lookup.
       agent: false,
       headers,
       lookup:
@@ -151,6 +171,7 @@ function requestPinned(options) {
         return;
       }
 
+      // Identity encoding makes the byte cap apply to the actual payload and avoids decompression bombs.
       const contentEncoding = String(
         firstHeaderValue(responseHeaders['content-encoding']) || 'identity'
       )
@@ -168,6 +189,7 @@ function requestPinned(options) {
         return;
       }
 
+      // Check both the declared size and streamed bytes because Content-Length is optional/untrusted.
       const declaredLength = Number(firstHeaderValue(responseHeaders['content-length']));
       if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
         const error = new PageFetchError(
@@ -244,6 +266,7 @@ function requestPinned(options) {
   });
 }
 
+/** Coordinates URL authorization, redirect policy, response validation, and bounded body reads. */
 class SafePageFetcher {
   constructor(options) {
     if (!options || !options.urlSafetyPolicy) {
@@ -258,6 +281,14 @@ class SafePageFetcher {
     this.timers = options.timers || { setTimeout, clearTimeout };
   }
 
+  /**
+   * Fetches one HTML document while enforcing a single timeout across every redirect hop.
+   *
+   * @param {string|URL} input
+   * @param {{signal?: AbortSignal}} [options]
+   * @returns {Promise<{html: Buffer, finalUrl: string, responseHeaders: object, redirectCount: number}>}
+   * @throws {PageFetchError|import('../errors').UrlPolicyError}
+   */
   async fetch(input, options = {}) {
     const fetchSignal = createFetchSignal(options.signal, this.timeoutMs, this.timers);
 
@@ -275,6 +306,7 @@ class SafePageFetcher {
         }
         visited.add(currentUrl.href);
 
+        // Every hop is normalized, resolved, and pinned independently; redirects are untrusted input.
         const authorized = await this.urlSafetyPolicy.authorize(currentUrl, {
           signal: fetchSignal.signal
         });

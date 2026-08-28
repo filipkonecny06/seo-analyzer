@@ -1,3 +1,5 @@
+// Converts the server report into accessible DOM nodes without interpolating untrusted HTML.
+
 import {
   ElementFactory,
   asArray,
@@ -15,7 +17,12 @@ import {
   normalizeCheckStatus
 } from './ui-utils.mjs';
 
+/** Renders one analyzer response into the existing report shell. */
 export class ReportRenderer {
+  /**
+   * @param {Element} root
+   * @param {object} [options] DOM and localization collaborators used by tests.
+   */
   constructor(root, options = {}) {
     this.root = root;
     this.document = options.document || root.ownerDocument;
@@ -42,6 +49,7 @@ export class ReportRenderer {
     };
   }
 
+  /** Restores the hidden report shell to its empty state. */
   clear() {
     this.root.hidden = true;
     this.root.setAttribute('aria-busy', 'false');
@@ -62,6 +70,12 @@ export class ReportRenderer {
     this.elements.checksSummary.textContent = 'A rule-by-rule breakdown of this page.';
   }
 
+  /**
+   * Renders a defensively normalized response payload.
+   * Missing or malformed optional fields become safe fallbacks rather than DOM exceptions.
+   *
+   * @param {object} payload
+   */
   render(payload) {
     const report = asRecord(payload.report);
     const metadata = asRecord(report.metadata);
@@ -124,6 +138,7 @@ export class ReportRenderer {
       : ['The configured rules did not produce any recommendations for this page.'];
     const fragment = this.elementFactory.fragment();
 
+    // ElementFactory assigns textContent, so page-derived recommendations cannot inject markup.
     items.forEach((recommendation) => {
       const item = this.elementFactory.create('li', {
         className: 'recommendation-list__item'
@@ -275,6 +290,7 @@ export class ReportRenderer {
       : 'No rule-by-rule checks were returned.';
   }
 
+  /** Moves focus to the report and respects the user's reduced-motion preference while scrolling. */
   focus() {
     this.elements.title.focus({ preventScroll: true });
     const reduceMotion = this.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches;

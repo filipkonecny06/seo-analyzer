@@ -1,8 +1,20 @@
 'use strict';
 
+// Converts environment variables into one validated, top-level-frozen runtime configuration object.
+
 const { DEFAULT_ALLOWED_PORTS } = require('./network/url-safety-policy');
 const { DEFAULT_USER_AGENT } = require('./version');
 
+/**
+ * Reads an integer and rejects non-integral or out-of-range values.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} name
+ * @param {number} fallback
+ * @param {{minimum?: number, maximum?: number}} [limits]
+ * @returns {number}
+ * @throws {TypeError} When the supplied value is not an integer inside the configured bounds.
+ */
 function parseInteger(env, name, fallback, limits = {}) {
   const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -15,6 +27,15 @@ function parseInteger(env, name, fallback, limits = {}) {
   return value;
 }
 
+/**
+ * Reads an explicit true/false environment flag.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} name
+ * @param {boolean} fallback
+ * @returns {boolean}
+ * @throws {TypeError} When a non-empty value is neither "true" nor "false".
+ */
 function parseBoolean(env, name, fallback) {
   const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -23,6 +44,13 @@ function parseBoolean(env, name, fallback) {
   throw new TypeError(`${name} must be either true or false.`);
 }
 
+/**
+ * Parses and deduplicates the outbound port allowlist used by the URL safety policy.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {number[]}
+ * @throws {TypeError} When any configured port is invalid.
+ */
 function parseAllowedPorts(env) {
   if (!env.ALLOWED_TARGET_PORTS) return [...DEFAULT_ALLOWED_PORTS];
   const ports = env.ALLOWED_TARGET_PORTS.split(',').map((value) => Number(value.trim()));
@@ -32,6 +60,13 @@ function parseAllowedPorts(env) {
   return [...new Set(ports)];
 }
 
+/**
+ * Validates the outbound User-Agent before it reaches Node's HTTP header handling.
+ * Control characters are rejected to prevent header injection through configuration.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {string}
+ */
 function parseUserAgent(env) {
   const value = String(env.OUTBOUND_USER_AGENT || DEFAULT_USER_AGENT);
   const containsControlCharacter = [...value].some((character) => {
@@ -44,6 +79,13 @@ function parseUserAgent(env) {
   return value;
 }
 
+/**
+ * Validates configuration at startup so invalid limits fail before the server accepts traffic.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Readonly<object>}
+ * @throws {TypeError} When any supported environment variable is invalid.
+ */
 function loadConfig(env = process.env) {
   const config = {
     host: env.HOST || '0.0.0.0',

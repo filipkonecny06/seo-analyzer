@@ -1,5 +1,7 @@
 'use strict';
 
+// Flat ESLint configuration separates Node/CommonJS globals from browser ES-module globals.
+
 const js = require('@eslint/js');
 const globals = require('globals');
 

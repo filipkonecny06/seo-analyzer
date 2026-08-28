@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <!-- Keyboard users can bypass the repeated header and analyzer controls. -->
     <a class="skip-link" href="#main-content">Skip to main content</a>
 
     <header class="site-header">
@@ -60,6 +61,7 @@
           </ul>
         </div>
 
+        <!-- Stable IDs form the document contract consumed by the browser modules. -->
         <div id="analyzer-panel" class="analyzer-card" aria-busy="false">
           <div class="analyzer-card__header">
             <span class="analyzer-card__icon" aria-hidden="true">
@@ -113,6 +115,7 @@
             </button>
           </form>
 
+          <!-- Separate polite progress and assertive error regions avoid competing announcements. -->
           <div class="feedback" aria-atomic="true">
             <p id="status" class="feedback__status" role="status" aria-live="polite"></p>
             <p
@@ -127,6 +130,7 @@
         </div>
       </section>
 
+      <!-- After success, the renderer unhides this region and focuses its report heading. -->
       <section id="report" class="report" aria-labelledby="report-title" aria-busy="false" hidden>
         <article class="report-summary card">
           <div class="report-summary__heading">
@@ -219,6 +223,7 @@
             </div>
           </div>
 
+          <!-- A focusable named region makes the wide table keyboard-scrollable on small screens. -->
           <div class="table-wrap" tabindex="0" role="region" aria-label="Detailed SEO checks table">
             <table class="checks-table">
               <caption>
