@@ -7,6 +7,7 @@ const { UrlPolicyError } = require('../errors');
 
 const DEFAULT_ALLOWED_PORTS = Object.freeze([80, 443]);
 const BLOCKED_HOST_SUFFIXES = Object.freeze(['.localhost', '.local', '.internal', '.home.arpa']);
+const EMPTY_DNS_RESULT_CODES = new Set(['ENODATA', 'ENOTFOUND']);
 
 function stripIpv6Brackets(hostname) {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
@@ -38,12 +39,36 @@ function assertPublicAddress(address) {
   return normalized;
 }
 
+function signalReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error('The operation was cancelled.');
+}
+
+function createDefaultResolver() {
+  return new dns.Resolver();
+}
+
+async function resolveAddressFamily(resolver, method, hostname, family) {
+  try {
+    const records = await resolver[method](hostname);
+    return records.map((record) => ({
+      address: typeof record === 'string' ? record : record.address,
+      family
+    }));
+  } catch (error) {
+    if (EMPTY_DNS_RESULT_CODES.has(error?.code)) return [];
+    throw error;
+  }
+}
+
 class UrlSafetyPolicy {
   constructor(options = {}) {
-    this.resolver = options.resolver || dns.lookup;
+    this.resolverFactory = options.resolverFactory || createDefaultResolver;
     this.dnsTimeoutMs = options.dnsTimeoutMs || 3000;
     this.maxUrlLength = options.maxUrlLength || 2048;
     this.allowedPorts = new Set(options.allowedPorts || DEFAULT_ALLOWED_PORTS);
+    this.timers = options.timers || { setTimeout, clearTimeout };
   }
 
   normalize(input) {
@@ -107,7 +132,8 @@ class UrlSafetyPolicy {
     return url;
   }
 
-  async authorize(input) {
+  async authorize(input, options = {}) {
+    if (options.signal?.aborted) throw signalReason(options.signal);
     const url = this.normalize(input);
     const hostname = stripIpv6Brackets(url.hostname);
     let resolved;
@@ -115,7 +141,7 @@ class UrlSafetyPolicy {
     if (net.isIP(hostname)) {
       resolved = [assertPublicAddress(hostname)];
     } else {
-      const records = await this.resolveWithTimeout(hostname);
+      const records = await this.resolveWithTimeout(hostname, options);
       if (!Array.isArray(records) || records.length === 0) {
         throw new UrlPolicyError('The target hostname did not resolve.', {
           code: 'DNS_NO_RESULTS',
@@ -132,23 +158,68 @@ class UrlSafetyPolicy {
     return { url, addresses: unique, selectedAddress };
   }
 
-  async resolveWithTimeout(hostname) {
+  async resolveWithTimeout(hostname, options = {}) {
+    if (options.signal?.aborted) throw signalReason(options.signal);
+
+    let resolver;
     let timer;
+    let abortHandler;
     try {
-      return await Promise.race([
-        Promise.resolve(this.resolver(hostname, { all: true, verbatim: true })),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            reject(
-              new UrlPolicyError('DNS lookup timed out.', {
-                code: 'DNS_TIMEOUT',
-                statusCode: 504
-              })
-            );
-          }, this.dnsTimeoutMs);
-        })
-      ]);
+      resolver = this.resolverFactory();
+      if (
+        !resolver ||
+        typeof resolver.resolve4 !== 'function' ||
+        typeof resolver.resolve6 !== 'function' ||
+        typeof resolver.cancel !== 'function'
+      ) {
+        throw new TypeError('The DNS resolver factory returned an invalid resolver.');
+      }
+
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+
+        const resolveOnce = (records) => {
+          if (settled) return;
+          settled = true;
+          resolve(records);
+        };
+        const rejectAndCancel = (error) => {
+          if (settled) return;
+          settled = true;
+          try {
+            resolver.cancel();
+          } catch (_cancelError) {
+            // Preserve the safe timeout, cancellation, or lookup error selected by the caller.
+          }
+          reject(error);
+        };
+
+        timer = this.timers.setTimeout(() => {
+          rejectAndCancel(
+            new UrlPolicyError('DNS lookup timed out.', {
+              code: 'DNS_TIMEOUT',
+              statusCode: 504
+            })
+          );
+        }, this.dnsTimeoutMs);
+
+        if (options.signal) {
+          abortHandler = () => rejectAndCancel(signalReason(options.signal));
+          options.signal.addEventListener('abort', abortHandler, { once: true });
+          if (options.signal.aborted) abortHandler();
+        }
+
+        if (settled) return;
+        Promise.all([
+          resolveAddressFamily(resolver, 'resolve4', hostname, 4),
+          resolveAddressFamily(resolver, 'resolve6', hostname, 6)
+        ]).then(
+          ([ipv4, ipv6]) => resolveOnce([...ipv4, ...ipv6]),
+          (error) => rejectAndCancel(error)
+        );
+      });
     } catch (error) {
+      if (options.signal?.aborted) throw signalReason(options.signal);
       if (error instanceof UrlPolicyError) {
         throw error;
       }
@@ -158,7 +229,8 @@ class UrlSafetyPolicy {
         cause: error
       });
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) this.timers.clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abortHandler);
     }
   }
 

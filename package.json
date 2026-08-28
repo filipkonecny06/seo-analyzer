@@ -1,20 +1,35 @@
-﻿{
+{
   "name": "on-page-seo-analyzer",
   "version": "2.0.0",
+  "packageManager": "npm@11.13.0",
   "private": true,
-  "description": "A security-conscious, extensible on-page SEO analyzer for public URLs",
+  "description": "On-page SEO analyzer with bounded public-page fetching and transparent scoring",
+  "license": "MIT",
+  "author": "Filip Konecny",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/filipkonecny06/seo-analyzer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/filipkonecny06/seo-analyzer/issues"
+  },
+  "homepage": "https://github.com/filipkonecny06/seo-analyzer#readme",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "lint": "eslint .",
+    "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test",
-    "test:coverage": "c8 --check-coverage --lines 80 --functions 80 --branches 70 node --test",
+    "test:coverage": "npm run test:coverage:server && npm run test:coverage:browser",
+    "test:coverage:server": "c8 --all --include=src/**/*.js --per-file --check-coverage --lines 85 --functions 80 --branches 60 --reports-dir=coverage/server --reporter=text --reporter=lcov node --test",
+    "test:coverage:browser": "c8 --all --include=public/**/*.mjs --per-file --check-coverage --lines 90 --functions 90 --branches 80 --reports-dir=coverage/browser --reporter=text --reporter=lcov node --test test/browser-analyzer-app.test.js test/browser-api-client.test.js test/browser-report-renderer.test.js test/browser-utils.test.js",
+    "audit:production": "npm audit --omit=dev --audit-level=moderate",
     "check": "npm run lint && npm run format:check && npm run test:coverage"
   },
   "engines": {
-    "node": "^20.19.0 || ^22.13.0 || >=24"
+    "node": "^22.13.0 || ^24.0.0"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

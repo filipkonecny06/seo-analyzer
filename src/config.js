@@ -1,6 +1,7 @@
 'use strict';
 
 const { DEFAULT_ALLOWED_PORTS } = require('./network/url-safety-policy');
+const { DEFAULT_USER_AGENT } = require('./version');
 
 function parseInteger(env, name, fallback, limits = {}) {
   const raw = env[name];
@@ -29,6 +30,18 @@ function parseAllowedPorts(env) {
     throw new TypeError('ALLOWED_TARGET_PORTS must be a comma-separated list of valid ports.');
   }
   return [...new Set(ports)];
+}
+
+function parseUserAgent(env) {
+  const value = String(env.OUTBOUND_USER_AGENT || DEFAULT_USER_AGENT);
+  const containsControlCharacter = [...value].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint <= 31 || codePoint === 127;
+  });
+  if (containsControlCharacter) {
+    throw new TypeError('OUTBOUND_USER_AGENT must not contain control characters.');
+  }
+  return value;
 }
 
 function loadConfig(env = process.env) {
@@ -62,8 +75,24 @@ function loadConfig(env = process.env) {
       minimum: 1,
       maximum: 100
     }),
+    analysisTimeoutMs: parseInteger(env, 'ANALYSIS_TIMEOUT_MS', 5000, {
+      minimum: 100,
+      maximum: 60_000
+    }),
+    analysisMaxOldSpaceMb: parseInteger(env, 'ANALYSIS_MAX_OLD_SPACE_MB', 128, {
+      minimum: 16,
+      maximum: 512
+    }),
+    analysisMaxYoungSpaceMb: parseInteger(env, 'ANALYSIS_MAX_YOUNG_SPACE_MB', 16, {
+      minimum: 4,
+      maximum: 128
+    }),
+    analysisStackSizeMb: parseInteger(env, 'ANALYSIS_STACK_SIZE_MB', 4, {
+      minimum: 1,
+      maximum: 16
+    }),
     trustProxy: parseBoolean(env, 'TRUST_PROXY', false),
-    userAgent: env.OUTBOUND_USER_AGENT || 'PortfolioSEOAnalyzer/2.0',
+    userAgent: parseUserAgent(env),
     requestTimeoutMs: parseInteger(env, 'REQUEST_TIMEOUT_MS', 15_000, {
       minimum: 1000,
       maximum: 120_000
@@ -76,5 +105,6 @@ module.exports = {
   loadConfig,
   parseAllowedPorts,
   parseBoolean,
-  parseInteger
+  parseInteger,
+  parseUserAgent
 };

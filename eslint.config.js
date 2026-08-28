@@ -7,7 +7,7 @@ module.exports = [
   { ignores: ['coverage/**', 'node_modules/**'] },
   js.configs.recommended,
   {
-    files: ['server.js', 'src/**/*.js', 'test/**/*.js', 'eslint.config.js'],
+    files: ['server.js', 'src/**/*.js', 'test/**/*.js', 'test-support/**/*.js', 'eslint.config.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',
@@ -19,10 +19,10 @@ module.exports = [
     }
   },
   {
-    files: ['public/**/*.js'],
+    files: ['public/**/*.{js,mjs}'],
     languageOptions: {
       ecmaVersion: 'latest',
-      sourceType: 'script',
+      sourceType: 'module',
       globals: globals.browser
     },
     rules: {

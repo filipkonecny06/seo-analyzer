@@ -188,9 +188,50 @@ class CanonicalRule extends AnalysisRule {
   }
 }
 
+function addDirectiveTokens(directives, value) {
+  const tokens = String(value || '')
+    .toLowerCase()
+    .match(/[a-z][a-z0-9_-]*/gu);
+  tokens?.forEach((token) => directives.add(token));
+}
+
+const PARAMETERIZED_ROBOTS_DIRECTIVES = new Set([
+  'max-image-preview',
+  'max-snippet',
+  'max-video-preview',
+  'unavailable_after'
+]);
+
+function addXRobotsTagDirectives(directives, value) {
+  let appliesToGooglebot = true;
+
+  String(value || '')
+    .split(',')
+    .forEach((part) => {
+      const scopedDirective = part.match(/^\s*([a-z][a-z0-9_-]*)\s*:\s*(.*)$/iu);
+      const directiveText = scopedDirective ? scopedDirective[2] : part;
+
+      if (scopedDirective) {
+        const prefix = scopedDirective[1].toLowerCase();
+        if (PARAMETERIZED_ROBOTS_DIRECTIVES.has(prefix)) {
+          if (appliesToGooglebot) addDirectiveTokens(directives, part);
+          return;
+        }
+        appliesToGooglebot = prefix === 'googlebot';
+      }
+      if (appliesToGooglebot) addDirectiveTokens(directives, directiveText);
+    });
+}
+
 function parseRobotsDirectives(snapshot) {
-  const source = `${snapshot.metadata.robots},${snapshot.metadata.xRobotsTag}`.toLowerCase();
-  const directives = new Set(source.match(/[a-z][a-z0-9_-]*/gu) || []);
+  const directives = new Set();
+  addDirectiveTokens(directives, snapshot.metadata.robots);
+  addDirectiveTokens(directives, snapshot.metadata.googlebot);
+  const xRobotsTags = Array.isArray(snapshot.metadata.xRobotsTags)
+    ? snapshot.metadata.xRobotsTags
+    : [snapshot.metadata.xRobotsTag];
+  xRobotsTags.forEach((value) => addXRobotsTagDirectives(directives, value));
+
   if (directives.has('none')) {
     directives.add('noindex');
     directives.add('nofollow');
@@ -365,26 +406,44 @@ class StructuredDataRule extends AnalysisRule {
           'Add relevant schema.org JSON-LD only when it accurately describes visible content.'
       });
     }
-    if (!data.valid) {
+    if (!data.parseable) {
       return result(this, {
         points: 0,
         status: 'fail',
-        detail: `All ${data.total} JSON-LD blocks contain invalid JSON.`,
+        detail: `None of the ${data.total} JSON-LD blocks contains a JSON object or array.`,
         recommendation: 'Fix invalid JSON-LD and validate it with a structured-data testing tool.'
+      });
+    }
+    if (!data.typed) {
+      return result(this, {
+        points: 0,
+        status: 'warn',
+        detail: `${data.parseable} parseable JSON-LD block${data.parseable === 1 ? '' : 's'} found, but none declares a non-empty @type.`,
+        recommendation:
+          'Declare an accurate schema.org @type for structured data that describes visible content.'
       });
     }
     if (data.invalid) {
       return result(this, {
         points: 3,
         status: 'warn',
-        detail: `${data.valid} valid and ${data.invalid} invalid JSON-LD blocks were found.`,
+        detail: `${data.typed} typed, ${data.untyped} untyped, and ${data.invalid} invalid JSON-LD blocks were found.`,
         recommendation: 'Fix or remove malformed JSON-LD blocks.'
+      });
+    }
+    if (data.untyped) {
+      return result(this, {
+        points: 4,
+        status: 'warn',
+        detail: `${data.typed} typed and ${data.untyped} untyped JSON-LD blocks were found.`,
+        recommendation:
+          'Add an accurate schema.org @type to each JSON-LD block or remove blocks that carry no structured-data entity.'
       });
     }
     return result(this, {
       points: 5,
       status: 'pass',
-      detail: `${data.valid} valid JSON-LD block${data.valid === 1 ? '' : 's'} found${data.types.length ? ` (${data.types.join(', ')})` : ''}.`
+      detail: `${data.typed} parseable, typed JSON-LD block${data.typed === 1 ? '' : 's'} found (${data.types.join(', ')}).`
     });
   }
 }

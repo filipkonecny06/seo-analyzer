@@ -8,13 +8,83 @@ const {
   normalizeAddress
 } = require('../src/network/url-safety-policy');
 
+function dnsError(code) {
+  return Object.assign(new Error(`DNS ${code}`), { code });
+}
+
+function staticResolverFactory(options = {}) {
+  return () => ({
+    async resolve4() {
+      if (options.ipv4Error) throw options.ipv4Error;
+      return options.ipv4 || [];
+    },
+    async resolve6() {
+      if (options.ipv6Error) throw options.ipv6Error;
+      return options.ipv6 || [];
+    },
+    cancel() {
+      options.onCancel?.();
+    }
+  });
+}
+
+function createPendingResolverHarness() {
+  let activeQueries = 0;
+  let cancelCalls = 0;
+  const pending = new Map();
+  let markBothStarted;
+  const bothStarted = new Promise((resolve) => {
+    markBothStarted = resolve;
+  });
+
+  const start = (family) =>
+    new Promise((resolve, reject) => {
+      activeQueries += 1;
+      pending.set(family, { resolve, reject });
+      if (pending.size === 2) markBothStarted();
+    });
+  const finish = (family, callback) => {
+    const query = pending.get(family);
+    if (!query) return;
+    pending.delete(family);
+    activeQueries -= 1;
+    callback(query);
+  };
+
+  return {
+    resolver: {
+      resolve4: () => start(4),
+      resolve6: () => start(6),
+      cancel() {
+        cancelCalls += 1;
+        for (const family of [...pending.keys()]) {
+          finish(family, ({ reject }) => reject(dnsError('ECANCELLED')));
+        }
+      }
+    },
+    bothStarted,
+    resolve4(records) {
+      finish(4, ({ resolve }) => resolve(records));
+    },
+    resolve6(records) {
+      finish(6, ({ resolve }) => resolve(records));
+    },
+    get activeQueries() {
+      return activeQueries;
+    },
+    get cancelCalls() {
+      return cancelCalls;
+    }
+  };
+}
+
 describe('UrlSafetyPolicy', () => {
   it('normalizes safe public URLs and strips fragments', async () => {
     const policy = new UrlSafetyPolicy({
-      resolver: async () => [
-        { address: '93.184.216.34', family: 4 },
-        { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 }
-      ]
+      resolverFactory: staticResolverFactory({
+        ipv4: ['93.184.216.34'],
+        ipv6: ['2606:2800:220:1:248:1893:25c8:1946']
+      })
     });
     const authorized = await policy.authorize('example.com/docs#intro');
 
@@ -70,44 +140,143 @@ describe('UrlSafetyPolicy', () => {
 
   it('rejects a hostname when any DNS answer is non-public', async () => {
     const policy = new UrlSafetyPolicy({
-      resolver: async () => [
-        { address: '93.184.216.34', family: 4 },
-        { address: '10.0.0.4', family: 4 }
-      ]
+      resolverFactory: staticResolverFactory({ ipv4: ['93.184.216.34', '10.0.0.4'] })
     });
     await assert.rejects(policy.authorize('https://mixed.example'), { code: 'NON_PUBLIC_ADDRESS' });
   });
 
   it('deduplicates DNS answers and reports lookup failures safely', async () => {
     const duplicatePolicy = new UrlSafetyPolicy({
-      resolver: async () => [
-        { address: '93.184.216.34', family: 4 },
-        { address: '93.184.216.34', family: 4 }
-      ]
+      resolverFactory: staticResolverFactory({
+        ipv4: ['93.184.216.34', '93.184.216.34']
+      })
     });
     assert.equal((await duplicatePolicy.authorize('https://example.com')).addresses.length, 1);
 
-    const emptyPolicy = new UrlSafetyPolicy({ resolver: async () => [] });
+    const emptyPolicy = new UrlSafetyPolicy({
+      resolverFactory: staticResolverFactory({
+        ipv4Error: dnsError('ENODATA'),
+        ipv6Error: dnsError('ENOTFOUND')
+      })
+    });
     await assert.rejects(emptyPolicy.authorize('https://empty.example'), {
       code: 'DNS_NO_RESULTS'
     });
 
+    let cancelCalls = 0;
     const failedPolicy = new UrlSafetyPolicy({
-      resolver: async () => {
-        throw new Error('resolver detail must not escape');
-      }
+      resolverFactory: staticResolverFactory({
+        ipv4Error: dnsError('ESERVFAIL'),
+        onCancel: () => {
+          cancelCalls += 1;
+        }
+      })
     });
     await assert.rejects(failedPolicy.authorize('https://failed.example'), {
       code: 'DNS_LOOKUP_FAILED'
     });
+    assert.equal(cancelCalls, 1);
   });
 
-  it('enforces a DNS deadline', async () => {
-    const policy = new UrlSafetyPolicy({
-      dnsTimeoutMs: 10,
-      resolver: () => new Promise(() => {})
+  it('accepts either address family when the other has no records', async () => {
+    const ipv4Only = new UrlSafetyPolicy({
+      resolverFactory: staticResolverFactory({
+        ipv4: ['93.184.216.34'],
+        ipv6Error: dnsError('ENODATA')
+      })
     });
-    await assert.rejects(policy.authorize('https://slow.example'), { code: 'DNS_TIMEOUT' });
+    const ipv6Only = new UrlSafetyPolicy({
+      resolverFactory: staticResolverFactory({
+        ipv4Error: dnsError('ENOTFOUND'),
+        ipv6: ['2606:2800:220:1:248:1893:25c8:1946']
+      })
+    });
+
+    assert.deepEqual((await ipv4Only.authorize('https://ipv4.example')).selectedAddress, {
+      address: '93.184.216.34',
+      family: 4,
+      range: 'unicast'
+    });
+    assert.deepEqual((await ipv6Only.authorize('https://ipv6.example')).selectedAddress, {
+      address: '2606:2800:220:1:248:1893:25c8:1946',
+      family: 6,
+      range: 'unicast'
+    });
+  });
+
+  it('cancels both DNS queries when the DNS deadline expires', async () => {
+    const harness = createPendingResolverHarness();
+    let deadlineCallback;
+    let clearedDeadline;
+    const policy = new UrlSafetyPolicy({
+      dnsTimeoutMs: 1000,
+      resolverFactory: () => harness.resolver,
+      timers: {
+        setTimeout(callback) {
+          deadlineCallback = callback;
+          return 'dns-deadline';
+        },
+        clearTimeout(timer) {
+          clearedDeadline = timer;
+        }
+      }
+    });
+    const pendingAuthorization = policy.authorize('https://slow.example');
+
+    await harness.bothStarted;
+    assert.equal(harness.activeQueries, 2);
+    deadlineCallback();
+
+    await assert.rejects(pendingAuthorization, { code: 'DNS_TIMEOUT' });
+    assert.equal(harness.cancelCalls, 1);
+    assert.equal(harness.activeQueries, 0);
+    assert.equal(clearedDeadline, 'dns-deadline');
+  });
+
+  it('cancels both DNS queries when the caller disconnects', { timeout: 2000 }, async () => {
+    const harness = createPendingResolverHarness();
+    const policy = new UrlSafetyPolicy({
+      resolverFactory: () => harness.resolver
+    });
+    const controller = new AbortController();
+    const pendingAuthorization = policy.authorize('https://cancelled.example', {
+      signal: controller.signal
+    });
+
+    await harness.bothStarted;
+    controller.abort();
+
+    await assert.rejects(pendingAuthorization, { name: 'AbortError' });
+    assert.equal(harness.cancelCalls, 1);
+    assert.equal(harness.activeQueries, 0);
+  });
+
+  it('uses an independent resolver for each authorization', async () => {
+    const harnesses = [];
+    const policy = new UrlSafetyPolicy({
+      resolverFactory: () => {
+        const harness = createPendingResolverHarness();
+        harnesses.push(harness);
+        return harness.resolver;
+      }
+    });
+    const firstController = new AbortController();
+    const firstAuthorization = policy.authorize('https://first.example', {
+      signal: firstController.signal
+    });
+    const secondAuthorization = policy.authorize('https://second.example');
+
+    await Promise.all(harnesses.map((harness) => harness.bothStarted));
+    firstController.abort();
+    harnesses[1].resolve4(['93.184.216.34']);
+    harnesses[1].resolve6([]);
+
+    await assert.rejects(firstAuthorization, { name: 'AbortError' });
+    assert.equal((await secondAuthorization).selectedAddress.address, '93.184.216.34');
+    assert.equal(harnesses[0].cancelCalls, 1);
+    assert.equal(harnesses[1].cancelCalls, 0);
+    assert.equal(harnesses[0].activeQueries, 0);
+    assert.equal(harnesses[1].activeQueries, 0);
   });
 
   it('creates a DNS lookup callback pinned to the approved address', async () => {

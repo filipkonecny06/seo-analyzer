@@ -66,6 +66,11 @@ function normalizeWhitespace(value) {
     .trim();
 }
 
+function compareText(left, right) {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
 function loadHtml(input) {
   if (Buffer.isBuffer(input) && typeof cheerio.loadBuffer === 'function') {
     return cheerio.loadBuffer(input);
@@ -83,6 +88,11 @@ function findMetaValues($, attributeName, expectedValue) {
     }
   });
   return values;
+}
+
+function normalizeHeaderValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values.map(normalizeWhitespace).filter(Boolean);
 }
 
 function findCanonical($, pageUrl) {
@@ -113,15 +123,22 @@ function collectStructuredDataTypes(value, types = new Set()) {
   if (!value || typeof value !== 'object') return types;
 
   const rawType = value['@type'];
-  if (Array.isArray(rawType)) rawType.forEach((type) => types.add(String(type)));
-  else if (rawType) types.add(String(rawType));
+  const addType = (type) => {
+    if (typeof type === 'string' && type.trim()) types.add(type.trim());
+  };
+  if (Array.isArray(rawType)) rawType.forEach(addType);
+  else addType(rawType);
 
-  if (value['@graph']) collectStructuredDataTypes(value['@graph'], types);
+  Object.entries(value).forEach(([key, nestedValue]) => {
+    if (key !== '@type' && key !== '@context') {
+      collectStructuredDataTypes(nestedValue, types);
+    }
+  });
   return types;
 }
 
 function extractStructuredData($) {
-  const result = { total: 0, valid: 0, invalid: 0, types: [] };
+  const result = { total: 0, parseable: 0, typed: 0, untyped: 0, invalid: 0, types: [] };
   const types = new Set();
 
   $('script').each((_index, element) => {
@@ -134,14 +151,20 @@ function extractStructuredData($) {
     try {
       const value = JSON.parse($(element).text());
       if (value === null || typeof value !== 'object') throw new TypeError('Expected an object.');
-      result.valid += 1;
-      collectStructuredDataTypes(value, types);
+      result.parseable += 1;
+      const blockTypes = collectStructuredDataTypes(value);
+      if (blockTypes.size) {
+        result.typed += 1;
+        blockTypes.forEach((structuredDataType) => types.add(structuredDataType));
+      } else {
+        result.untyped += 1;
+      }
     } catch (_error) {
       result.invalid += 1;
     }
   });
 
-  result.types = [...types].sort((left, right) => left.localeCompare(right));
+  result.types = [...types].sort(compareText);
   return result;
 }
 
@@ -149,7 +172,7 @@ function tokenize(text) {
   return (
     text
       .normalize('NFKC')
-      .toLocaleLowerCase()
+      .toLowerCase()
       .match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) || []
   );
 }
@@ -164,7 +187,7 @@ function extractTopKeywords(tokens) {
     frequency.set(token, (frequency.get(token) || 0) + 1);
   }
   return [...frequency.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .sort((left, right) => right[1] - left[1] || compareText(left[0], right[0]))
     .slice(0, 10)
     .map(([term, count]) => ({ term, count }));
 }
@@ -189,9 +212,10 @@ class PageSnapshot {
     const title = normalizeWhitespace($('title').first().text());
     const descriptions = findMetaValues($, 'name', 'description');
     const robotsValues = findMetaValues($, 'name', 'robots');
+    const googlebotValues = findMetaValues($, 'name', 'googlebot');
     const viewportValues = findMetaValues($, 'name', 'viewport');
     const canonical = findCanonical($, this.pageUrl);
-    const xRobotsTag = normalizeWhitespace(options.responseHeaders?.['x-robots-tag']);
+    const xRobotsTags = normalizeHeaderValues(options.responseHeaders?.['x-robots-tag']);
 
     const headingCounts = { h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0 };
     const headingLevels = [];
@@ -244,7 +268,9 @@ class PageSnapshot {
       canonicalRaw: canonical.raw,
       canonicalValid: canonical.valid,
       robots: robotsValues.join(', '),
-      xRobotsTag,
+      googlebot: googlebotValues.join(', '),
+      xRobotsTag: xRobotsTags.join(', '),
+      xRobotsTags,
       viewport: viewportValues[0] || '',
       lang: normalizeWhitespace($('html').first().attr('lang')),
       og: {
