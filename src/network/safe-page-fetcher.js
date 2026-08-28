@@ -45,7 +45,6 @@ function requestPinned(options) {
         })
       );
     }, timeoutMs);
-    timer.unref?.();
 
     request.on('response', (response) => {
       const statusCode = Number(response.statusCode || 0);

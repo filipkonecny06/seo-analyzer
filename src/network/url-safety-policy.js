@@ -146,7 +146,6 @@ class UrlSafetyPolicy {
               })
             );
           }, this.dnsTimeoutMs);
-          timer.unref?.();
         })
       ]);
     } catch (error) {
