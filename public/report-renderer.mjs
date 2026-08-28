@@ -17,11 +17,26 @@ import {
   normalizeCheckStatus
 } from './ui-utils.mjs';
 
+export const REPORT_SELECTORS = Object.freeze({
+  title: '#report-title',
+  analyzedUrl: '#analyzed-url',
+  fetchedAt: '#fetched-at',
+  scoreDial: '#score-dial',
+  scoreValue: '#score-value',
+  scoreGrade: '#score-grade',
+  scoreMessage: '#score-message',
+  recommendations: '#recommendations',
+  metrics: '#metrics',
+  keywords: '#keywords',
+  checksSummary: '#checks-summary',
+  checksBody: '#checks-body'
+});
+
 /** Renders one analyzer response into the existing report shell. */
 export class ReportRenderer {
   /**
-   * @param {Element} root
-   * @param {object} [options] DOM and localization collaborators used by tests.
+   * @param {HTMLElement} root
+   * @param {{document?: Document, window?: Window, elementFactory?: ElementFactory, numberFormatter?: Intl.NumberFormat, dateFormatter?: Intl.DateTimeFormat}} [options]
    */
   constructor(root, options = {}) {
     this.root = root;
@@ -34,18 +49,32 @@ export class ReportRenderer {
       options.dateFormatter ||
       new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
     this.elements = {
-      title: getRequiredElement(root, '#report-title'),
-      analyzedUrl: getRequiredElement(root, '#analyzed-url'),
-      fetchedAt: getRequiredElement(root, '#fetched-at'),
-      scoreDial: getRequiredElement(root, '#score-dial'),
-      scoreValue: getRequiredElement(root, '#score-value'),
-      scoreGrade: getRequiredElement(root, '#score-grade'),
-      scoreMessage: getRequiredElement(root, '#score-message'),
-      recommendations: getRequiredElement(root, '#recommendations'),
-      metrics: getRequiredElement(root, '#metrics'),
-      keywords: getRequiredElement(root, '#keywords'),
-      checksSummary: getRequiredElement(root, '#checks-summary'),
-      checksBody: getRequiredElement(root, '#checks-body')
+      title: /** @type {HTMLElement} */ (getRequiredElement(root, REPORT_SELECTORS.title)),
+      analyzedUrl: /** @type {HTMLAnchorElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.analyzedUrl)
+      ),
+      fetchedAt: /** @type {HTMLElement} */ (getRequiredElement(root, REPORT_SELECTORS.fetchedAt)),
+      scoreDial: /** @type {HTMLElement} */ (getRequiredElement(root, REPORT_SELECTORS.scoreDial)),
+      scoreValue: /** @type {HTMLElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.scoreValue)
+      ),
+      scoreGrade: /** @type {HTMLElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.scoreGrade)
+      ),
+      scoreMessage: /** @type {HTMLElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.scoreMessage)
+      ),
+      recommendations: /** @type {HTMLOListElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.recommendations)
+      ),
+      metrics: /** @type {HTMLDListElement} */ (getRequiredElement(root, REPORT_SELECTORS.metrics)),
+      keywords: /** @type {HTMLElement} */ (getRequiredElement(root, REPORT_SELECTORS.keywords)),
+      checksSummary: /** @type {HTMLElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.checksSummary)
+      ),
+      checksBody: /** @type {HTMLTableSectionElement} */ (
+        getRequiredElement(root, REPORT_SELECTORS.checksBody)
+      )
     };
   }
 
@@ -74,7 +103,7 @@ export class ReportRenderer {
    * Renders a defensively normalized response payload.
    * Missing or malformed optional fields become safe fallbacks rather than DOM exceptions.
    *
-   * @param {object} payload
+   * @param {import('../src/contracts.js').AnalyzeSuccessResponse} payload
    */
   render(payload) {
     const report = asRecord(payload.report);
@@ -92,6 +121,7 @@ export class ReportRenderer {
     this.root.setAttribute('aria-busy', 'false');
   }
 
+  /** @param {unknown} url @param {string} fetchedAt */
   renderSource(url, fetchedAt) {
     const urlText = displayText(url);
     const safeUrl = getSafeHttpUrl(url);
@@ -111,6 +141,7 @@ export class ReportRenderer {
       : `Completed ${this.dateFormatter.format(date)}`;
   }
 
+  /** @param {unknown} rawScore @param {unknown} rawGrade */
   renderScore(rawScore, rawGrade) {
     const score = clampScore(rawScore);
     const formattedScore = this.numberFormatter.format(score);
@@ -129,6 +160,7 @@ export class ReportRenderer {
     this.elements.scoreGrade.className = `grade-badge grade-badge--${tone}`;
   }
 
+  /** @param {unknown} rawRecommendations */
   renderRecommendations(rawRecommendations) {
     const recommendations = asArray(rawRecommendations).filter(
       (item) => typeof item === 'string' && item.trim()
@@ -154,6 +186,7 @@ export class ReportRenderer {
     this.elements.recommendations.replaceChildren(fragment);
   }
 
+  /** @param {Record<string, unknown>} metadata @param {Record<string, unknown>} content */
   renderMetrics(metadata, content) {
     const words = asRecord(content.words);
     const headings = asRecord(content.headings);
@@ -196,10 +229,11 @@ export class ReportRenderer {
     this.elements.metrics.replaceChildren(fragment);
   }
 
+  /** @param {unknown} rawKeywords */
   renderKeywords(rawKeywords) {
-    const keywords = asArray(rawKeywords).filter(
-      (entry) => isRecord(entry) && hasValue(entry.term)
-    );
+    const keywords = asArray(rawKeywords)
+      .filter(isRecord)
+      .filter((entry) => hasValue(entry.term));
 
     if (!keywords.length) {
       const emptyState = this.elementFactory.create('p', {
@@ -235,6 +269,7 @@ export class ReportRenderer {
     this.elements.keywords.replaceChildren(fragment);
   }
 
+  /** @param {unknown} rawChecks */
   renderChecks(rawChecks) {
     const checks = asArray(rawChecks).filter(isRecord);
     const fragment = this.elementFactory.fragment();

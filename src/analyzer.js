@@ -16,8 +16,8 @@ const normalizationPolicy = new UrlSafetyPolicy();
  *
  * @param {string} pageUrl
  * @param {string|Buffer} html
- * @param {object} [options]
- * @returns {object}
+ * @param {{responseHeaders?: Record<string, string|string[]>}} [options]
+ * @returns {import('./contracts').AnalysisReport}
  */
 function analyzeHtml(pageUrl, html, options) {
   return defaultAnalyzer.analyze(pageUrl, html, options);

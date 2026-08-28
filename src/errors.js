@@ -19,6 +19,7 @@ class AppError extends Error {
 
 /** Expected rejection of a URL, hostname, port, or resolved network address. */
 class UrlPolicyError extends AppError {
+  /** @param {string} message @param {{cause?: Error, code?: string, statusCode?: number, expose?: boolean}} [options] */
   constructor(message, options = {}) {
     super(message, {
       ...options,
@@ -31,6 +32,7 @@ class UrlPolicyError extends AppError {
 
 /** Expected failure while retrieving a remote page within the fetch policy. */
 class PageFetchError extends AppError {
+  /** @param {string} message @param {{cause?: Error, code?: string, statusCode?: number, expose?: boolean}} [options] */
   constructor(message, options = {}) {
     super(message, {
       ...options,
@@ -43,6 +45,7 @@ class PageFetchError extends AppError {
 
 /** Failure to start, complete, or safely stop an isolated analysis. */
 class AnalysisExecutionError extends AppError {
+  /** @param {string} message @param {{cause?: Error, code?: string, statusCode?: number, expose?: boolean}} [options] */
   constructor(message, options = {}) {
     super(message, {
       ...options,

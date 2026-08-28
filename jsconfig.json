@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "maxNodeModuleJsDepth": 0,
+    "skipLibCheck": true
+  },
+  "include": ["server.js", "src/**/*.js", "public/**/*.js", "public/**/*.mjs"],
+  "exclude": ["coverage", "node_modules", "test", "test-support"]
+}

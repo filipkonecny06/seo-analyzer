@@ -4,11 +4,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { describe, test } = require('node:test');
+const { ENV_DEFAULTS } = require('../src/config');
 
 const projectRoot = path.resolve(__dirname, '..');
 
 function readProjectFile(relativePath) {
   return fs.readFileSync(path.join(projectRoot, relativePath), 'utf8');
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 describe('deployment project files', () => {
@@ -23,11 +28,16 @@ describe('deployment project files', () => {
       /HEALTHCHECK[\s\S]*http:\/\/127\.0\.0\.1:\$\{PORT:-3000\}\/api\/health/
     );
     [
-      'ANALYSIS_TIMEOUT_MS=5000',
-      'ANALYSIS_MAX_OLD_SPACE_MB=128',
-      'ANALYSIS_MAX_YOUNG_SPACE_MB=16',
-      'ANALYSIS_STACK_SIZE_MB=4'
-    ].forEach((setting) => assert.match(dockerfile, new RegExp(setting)));
+      'HOST',
+      'PORT',
+      'ANALYSIS_TIMEOUT_MS',
+      'ANALYSIS_MAX_OLD_SPACE_MB',
+      'ANALYSIS_MAX_YOUNG_SPACE_MB',
+      'ANALYSIS_STACK_SIZE_MB'
+    ].forEach((name) => {
+      const setting = `${name}=${ENV_DEFAULTS[name]}`;
+      assert.match(dockerfile, new RegExp(`\\b${escapeRegExp(setting)}(?:\\s|\\\\)`));
+    });
   });
 
   test('keeps repository metadata, local secrets, and development artifacts out of builds', () => {

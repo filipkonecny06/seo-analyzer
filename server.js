@@ -10,7 +10,7 @@ const { createServer } = require('./src/http/create-server');
  * Error output is intentionally allowlisted so request context is retained without serializing
  * arbitrary error fields that could contain response data or other sensitive values.
  *
- * @returns {{info(fields: object): void, error(fields: object): void}}
+ * @returns {{info(fields: Record<string, unknown>): void, error(fields: {error?: Error, requestId?: unknown, code?: unknown}): void}}
  */
 function createLogger() {
   return {
@@ -49,6 +49,7 @@ function start() {
     logger.info({ event: 'server.started', host: config.host, port: config.port });
   });
 
+  /** @param {string} signal */
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;

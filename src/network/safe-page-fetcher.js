@@ -9,6 +9,9 @@ const { DEFAULT_USER_AGENT } = require('../version');
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/** @typedef {{statusCode: number, headers: import('node:http').IncomingHttpHeaders, headerValues: Record<string, string[]>, body: Buffer}} PinnedResponse */
+
+/** @param {string|string[]|undefined} value */
 function firstHeaderValue(value) {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -16,8 +19,8 @@ function firstHeaderValue(value) {
 /**
  * Preserves repeated response-header fields when Node exposes either joined or distinct values.
  *
- * @param {object} headers
- * @param {object} headerValues
+ * @param {Record<string, string|string[]|undefined>} headers
+ * @param {Record<string, string|string[]|undefined>|undefined} headerValues
  * @param {string} name
  * @returns {string[]}
  */
@@ -33,6 +36,7 @@ function distinctHeaderValues(headers, headerValues, name) {
   return values.filter((value) => value !== undefined).map(String);
 }
 
+/** @param {AbortSignal|undefined} signal */
 function abortError(signal) {
   if (signal?.reason instanceof PageFetchError) return signal.reason;
   return new PageFetchError('The page fetch was cancelled.', {
@@ -42,10 +46,15 @@ function abortError(signal) {
   });
 }
 
+/**
+ * @param {AbortSignal|undefined} externalSignal
+ * @param {number} timeoutMs
+ * @param {{setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout}} timers
+ */
 function createFetchSignal(externalSignal, timeoutMs, timers) {
   // One internal signal gives timeout and caller cancellation the same cleanup path.
   const controller = new AbortController();
-  const forwardAbort = () => controller.abort(externalSignal.reason);
+  const forwardAbort = () => controller.abort(externalSignal?.reason);
 
   if (externalSignal?.aborted) forwardAbort();
   else externalSignal?.addEventListener('abort', forwardAbort, { once: true });
@@ -70,76 +79,190 @@ function createFetchSignal(externalSignal, timeoutMs, timers) {
   };
 }
 
+/** @param {AbortSignal|undefined} signal */
 function throwIfAborted(signal) {
   if (signal?.aborted) throw abortError(signal);
 }
 
+/** @param {number} maxResponseBytes */
+function responseTooLargeError(maxResponseBytes) {
+  return new PageFetchError(`The page exceeds the ${maxResponseBytes}-byte response limit.`, {
+    code: 'RESPONSE_TOO_LARGE',
+    statusCode: 413
+  });
+}
+
+/**
+ * Reads a successful response while enforcing the streamed byte limit.
+ *
+ * @param {import('node:http').IncomingMessage} response
+ * @param {import('node:http').ClientRequest} request
+ * @param {number} maxResponseBytes
+ * @param {(error: Error|null, value?: PinnedResponse) => void} finish
+ * @param {Omit<PinnedResponse, 'body'>} metadata
+ */
+function readResponseBody(response, request, maxResponseBytes, finish, metadata) {
+  /** @type {Buffer[]} */
+  const chunks = [];
+  let receivedBytes = 0;
+
+  response.on('data', (chunk) => {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    receivedBytes += buffer.length;
+    if (receivedBytes > maxResponseBytes) {
+      finish(responseTooLargeError(maxResponseBytes));
+      response.destroy();
+      request.destroy();
+      return;
+    }
+    chunks.push(buffer);
+  });
+  response.on('end', () => {
+    finish(null, { ...metadata, body: Buffer.concat(chunks, receivedBytes) });
+  });
+  response.on('aborted', () => {
+    finish(
+      new PageFetchError('The remote server closed the response early.', {
+        code: 'REMOTE_RESPONSE_ABORTED'
+      })
+    );
+  });
+  response.on('error', (error) => {
+    finish(
+      error instanceof PageFetchError
+        ? error
+        : new PageFetchError('The remote response could not be read.', {
+            code: 'REMOTE_RESPONSE_ERROR',
+            cause: error
+          })
+    );
+  });
+}
+
+/**
+ * Validates response metadata before handing a successful body to the bounded reader.
+ *
+ * @param {import('node:http').IncomingMessage} response
+ * @param {import('node:http').ClientRequest} request
+ * @param {number} maxResponseBytes
+ * @param {(error: Error|null, value?: PinnedResponse) => void} finish
+ */
+function handlePinnedResponse(response, request, maxResponseBytes, finish) {
+  const statusCode = Number(response.statusCode || 0);
+  const headers = response.headers;
+  const metadata = {
+    statusCode,
+    headers,
+    headerValues: {
+      'x-robots-tag': distinctHeaderValues(headers, response.headersDistinct, 'x-robots-tag')
+    }
+  };
+
+  if (REDIRECT_STATUSES.has(statusCode) || statusCode < 200 || statusCode >= 300) {
+    finish(null, { ...metadata, body: Buffer.alloc(0) });
+    response.destroy();
+    return;
+  }
+
+  // Identity encoding makes the byte cap apply to the payload and avoids decompression bombs.
+  const contentEncoding = String(firstHeaderValue(headers['content-encoding']) || 'identity')
+    .trim()
+    .toLowerCase();
+  if (contentEncoding !== 'identity') {
+    finish(
+      new PageFetchError('The remote server ignored the identity encoding request.', {
+        code: 'UNSUPPORTED_CONTENT_ENCODING'
+      })
+    );
+    response.destroy();
+    return;
+  }
+
+  // Content-Length is optional and untrusted, so the body reader independently caps streamed bytes.
+  const declaredLength = Number(firstHeaderValue(headers['content-length']));
+  if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+    finish(responseTooLargeError(maxResponseBytes));
+    response.destroy();
+    return;
+  }
+
+  readResponseBody(response, request, maxResponseBytes, finish, metadata);
+}
+
+/** @param {AbortSignal|undefined} externalSignal @param {number|undefined} timeoutMs */
+function createRequestSignal(externalSignal, timeoutMs) {
+  if (externalSignal || !Number.isFinite(timeoutMs)) {
+    return { signal: externalSignal, cleanup() {} };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort(
+      new PageFetchError(`The remote request exceeded ${timeoutMs} ms.`, {
+        code: 'FETCH_TIMEOUT',
+        statusCode: 504
+      })
+    );
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timeout);
+    }
+  };
+}
+
 /**
  * Performs one HTTP request using the address selected by UrlSafetyPolicy.
- * The promise has exactly one completion path and destroys sockets/streams on cancellation.
+ * Response, abort, timeout, and socket events share one completion path.
  *
- * @param {object} options Authorized URL, pinned lookup, limits, headers, and optional signal.
- * @returns {Promise<{statusCode: number, headers: object, headerValues: object, body: Buffer}>}
+ * @param {{url: URL, selectedAddress: {address: string, family: 4|6}, lookup?: import('node:net').LookupFunction, headers?: import('node:http').OutgoingHttpHeaders, timeoutMs?: number, maxResponseBytes: number, signal?: AbortSignal}} options
+ * @returns {Promise<PinnedResponse>}
  */
 function requestPinned(options) {
-  const { url, selectedAddress, lookup, headers, timeoutMs, maxResponseBytes } = options;
-  const transport = url.protocol === 'https:' ? https : http;
+  const transport = options.url.protocol === 'https:' ? https : http;
+  const requestSignal = createRequestSignal(options.signal, options.timeoutMs);
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    /** @type {import('node:http').ClientRequest|undefined} */
     let request;
+    /** @type {import('node:http').IncomingMessage|undefined} */
     let responseStream;
-    let abortHandler;
-    let ownedTimeout = null;
-    let signal = options.signal;
 
-    if (!signal && Number.isFinite(timeoutMs)) {
-      const timeoutController = new AbortController();
-      signal = timeoutController.signal;
-      ownedTimeout = setTimeout(() => {
-        timeoutController.abort(
-          new PageFetchError(`The remote request exceeded ${timeoutMs} ms.`, {
-            code: 'FETCH_TIMEOUT',
-            statusCode: 504
-          })
-        );
-      }, timeoutMs);
-    }
-
-    // Response, abort, timeout, and socket events can race; only the first may settle the request.
+    /** @param {Error|null} error @param {PinnedResponse} [value] */
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
-      if (ownedTimeout !== null) clearTimeout(ownedTimeout);
-      signal?.removeEventListener('abort', abortHandler);
+      requestSignal.cleanup();
+      requestSignal.signal?.removeEventListener('abort', abortHandler);
       if (error) reject(error);
-      else resolve(value);
+      else resolve(/** @type {PinnedResponse} */ (value));
     };
-
-    abortHandler = () => {
-      finish(abortError(signal));
+    const abortHandler = () => {
+      finish(abortError(requestSignal.signal));
       responseStream?.destroy();
       request?.destroy();
     };
 
-    if (signal?.aborted) {
-      finish(abortError(signal));
+    if (requestSignal.signal?.aborted) {
+      finish(abortError(requestSignal.signal));
       return;
     }
 
-    request = transport.request(url, {
+    request = transport.request(options.url, {
       method: 'GET',
       // A one-off agent prevents connection reuse from bypassing this request's pinned lookup.
       agent: false,
-      headers,
+      headers: options.headers,
       lookup:
-        lookup ||
-        ((_hostname, _options, callback) =>
-          callback(null, selectedAddress.address, selectedAddress.family))
+        options.lookup ||
+        ((_hostname, _lookupOptions, callback) =>
+          callback(null, options.selectedAddress.address, options.selectedAddress.family))
     });
 
-    signal?.addEventListener('abort', abortHandler, { once: true });
-    if (signal?.aborted) {
+    requestSignal.signal?.addEventListener('abort', abortHandler, { once: true });
+    if (requestSignal.signal?.aborted) {
       abortHandler();
       return;
     }
@@ -150,110 +273,12 @@ function requestPinned(options) {
         response.destroy();
         return;
       }
-      const statusCode = Number(response.statusCode || 0);
-      const responseHeaders = response.headers;
-      const headerValues = {
-        'x-robots-tag': distinctHeaderValues(
-          responseHeaders,
-          response.headersDistinct,
-          'x-robots-tag'
-        )
-      };
-
-      if (REDIRECT_STATUSES.has(statusCode) || statusCode < 200 || statusCode >= 300) {
-        finish(null, {
-          statusCode,
-          headers: responseHeaders,
-          headerValues,
-          body: Buffer.alloc(0)
-        });
-        response.destroy();
-        return;
-      }
-
-      // Identity encoding makes the byte cap apply to the actual payload and avoids decompression bombs.
-      const contentEncoding = String(
-        firstHeaderValue(responseHeaders['content-encoding']) || 'identity'
-      )
-        .trim()
-        .toLowerCase();
-      if (contentEncoding !== 'identity') {
-        const error = new PageFetchError(
-          'The remote server ignored the identity encoding request.',
-          {
-            code: 'UNSUPPORTED_CONTENT_ENCODING'
-          }
-        );
-        finish(error);
-        response.destroy();
-        return;
-      }
-
-      // Check both the declared size and streamed bytes because Content-Length is optional/untrusted.
-      const declaredLength = Number(firstHeaderValue(responseHeaders['content-length']));
-      if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
-        const error = new PageFetchError(
-          `The page exceeds the ${maxResponseBytes}-byte response limit.`,
-          {
-            code: 'RESPONSE_TOO_LARGE',
-            statusCode: 413
-          }
-        );
-        finish(error);
-        response.destroy();
-        return;
-      }
-
-      const chunks = [];
-      let receivedBytes = 0;
-      response.on('data', (chunk) => {
-        receivedBytes += chunk.length;
-        if (receivedBytes > maxResponseBytes) {
-          const error = new PageFetchError(
-            `The page exceeds the ${maxResponseBytes}-byte response limit.`,
-            {
-              code: 'RESPONSE_TOO_LARGE',
-              statusCode: 413
-            }
-          );
-          finish(error);
-          response.destroy();
-          request.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on('end', () => {
-        finish(null, {
-          statusCode,
-          headers: responseHeaders,
-          headerValues,
-          body: Buffer.concat(chunks, receivedBytes)
-        });
-      });
-      response.on('aborted', () => {
-        finish(
-          new PageFetchError('The remote server closed the response early.', {
-            code: 'REMOTE_RESPONSE_ABORTED'
-          })
-        );
-      });
-      response.on('error', (error) => {
-        finish(
-          error instanceof PageFetchError
-            ? error
-            : new PageFetchError('The remote response could not be read.', {
-                code: 'REMOTE_RESPONSE_ERROR',
-                cause: error
-              })
-        );
-      });
+      handlePinnedResponse(response, request, options.maxResponseBytes, finish);
     });
-
     request.on('error', (error) => {
       finish(
-        signal?.aborted
-          ? abortError(signal)
+        requestSignal.signal?.aborted
+          ? abortError(requestSignal.signal)
           : error instanceof PageFetchError
             ? error
             : new PageFetchError('The target page could not be reached.', {
@@ -268,6 +293,9 @@ function requestPinned(options) {
 
 /** Coordinates URL authorization, redirect policy, response validation, and bounded body reads. */
 class SafePageFetcher {
+  /**
+   * @param {{urlSafetyPolicy: import('../contracts').UrlSafetyPolicyContract, request?: typeof requestPinned, timeoutMs?: number, maxResponseBytes?: number, maxRedirects?: number, userAgent?: string, timers?: {setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout}}} options
+   */
   constructor(options) {
     if (!options || !options.urlSafetyPolicy) {
       throw new TypeError('SafePageFetcher requires a UrlSafetyPolicy instance.');
@@ -286,7 +314,7 @@ class SafePageFetcher {
    *
    * @param {string|URL} input
    * @param {{signal?: AbortSignal}} [options]
-   * @returns {Promise<{html: Buffer, finalUrl: string, responseHeaders: object, redirectCount: number}>}
+   * @returns {Promise<import('../contracts').PageFetchResult>}
    * @throws {PageFetchError|import('../errors').UrlPolicyError}
    */
   async fetch(input, options = {}) {
@@ -338,10 +366,10 @@ class SafePageFetcher {
           try {
             currentUrl = this.urlSafetyPolicy.normalize(new URL(location, currentUrl));
           } catch (error) {
-            if (error.code) throw error;
+            if (error && typeof error === 'object' && 'code' in error && error.code) throw error;
             throw new PageFetchError('The remote server returned an invalid redirect URL.', {
               code: 'INVALID_REDIRECT',
-              cause: error
+              cause: error instanceof Error ? error : undefined
             });
           }
           continue;

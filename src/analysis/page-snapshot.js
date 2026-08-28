@@ -74,11 +74,13 @@ function normalizeWhitespace(value) {
     .trim();
 }
 
+/** @param {string} left @param {string} right */
 function compareText(left, right) {
   if (left === right) return 0;
   return left < right ? -1 : 1;
 }
 
+/** @param {string|Buffer} input @returns {import('cheerio').CheerioAPI} */
 function loadHtml(input) {
   if (Buffer.isBuffer(input) && typeof cheerio.loadBuffer === 'function') {
     return cheerio.loadBuffer(input);
@@ -86,7 +88,13 @@ function loadHtml(input) {
   return cheerio.load(Buffer.isBuffer(input) ? input.toString('utf8') : String(input || ''));
 }
 
+/**
+ * @param {import('cheerio').CheerioAPI} $
+ * @param {string} attributeName
+ * @param {string} expectedValue
+ */
 function findMetaValues($, attributeName, expectedValue) {
+  /** @type {string[]} */
   const values = [];
   $('meta').each((_index, element) => {
     const key = String($(element).attr(attributeName) || '').toLowerCase();
@@ -98,11 +106,13 @@ function findMetaValues($, attributeName, expectedValue) {
   return values;
 }
 
+/** @param {string|string[]|undefined} value */
 function normalizeHeaderValues(value) {
   const values = Array.isArray(value) ? value : [value];
   return values.map(normalizeWhitespace).filter(Boolean);
 }
 
+/** @param {import('cheerio').CheerioAPI} $ @param {string} pageUrl */
 function findCanonical($, pageUrl) {
   let raw = '';
   $('link').each((_index, element) => {
@@ -123,6 +133,7 @@ function findCanonical($, pageUrl) {
   }
 }
 
+/** @param {unknown} value @param {Set<string>} [types] */
 function collectStructuredDataTypes(value, types = new Set()) {
   // JSON-LD entities may be nested or stored in @graph, so inspect the complete object tree.
   if (Array.isArray(value)) {
@@ -131,14 +142,16 @@ function collectStructuredDataTypes(value, types = new Set()) {
   }
   if (!value || typeof value !== 'object') return types;
 
-  const rawType = value['@type'];
+  const record = /** @type {Record<string, unknown>} */ (value);
+  const rawType = record['@type'];
+  /** @param {unknown} type */
   const addType = (type) => {
     if (typeof type === 'string' && type.trim()) types.add(type.trim());
   };
   if (Array.isArray(rawType)) rawType.forEach(addType);
   else addType(rawType);
 
-  Object.entries(value).forEach(([key, nestedValue]) => {
+  Object.entries(record).forEach(([key, nestedValue]) => {
     if (key !== '@type' && key !== '@context') {
       collectStructuredDataTypes(nestedValue, types);
     }
@@ -146,7 +159,9 @@ function collectStructuredDataTypes(value, types = new Set()) {
   return types;
 }
 
+/** @param {import('cheerio').CheerioAPI} $ */
 function extractStructuredData($) {
+  /** @type {import('../contracts').StructuredDataEvidence} */
   const result = { total: 0, parseable: 0, typed: 0, untyped: 0, invalid: 0, types: [] };
   const types = new Set();
 
@@ -216,17 +231,24 @@ function extractTopKeywords(tokens) {
     .map(([term, count]) => ({ term, count }));
 }
 
+/** @param {import('cheerio').CheerioAPI} $ */
 function extractVisibleText($) {
   // Exclude script, style, and template containers from the primary body-text word count.
-  const content = ($('body').length ? $('body') : $.root()).clone();
-  content.find('script, style, noscript, template, svg').remove();
-  return normalizeWhitespace(content.text());
+  if ($('body').length) {
+    const body = $('body').clone();
+    body.find('script, style, noscript, template, svg').remove();
+    return normalizeWhitespace(body.text());
+  }
+  const document = $.root().clone();
+  document.find('script, style, noscript, template, svg').remove();
+  return normalizeWhitespace(document.text());
 }
 
+/** @template T @param {T} value @returns {T} */
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
-  Object.values(value).forEach(deepFreeze);
-  return Object.freeze(value);
+  Object.values(/** @type {Record<string, unknown>} */ (value)).forEach(deepFreeze);
+  return /** @type {T} */ (Object.freeze(value));
 }
 
 /**
@@ -237,7 +259,7 @@ class PageSnapshot {
   /**
    * @param {string} pageUrl
    * @param {string|Buffer} html
-   * @param {{responseHeaders?: object}} [options]
+   * @param {{responseHeaders?: Record<string, string|string[]>}} [options]
    */
   constructor(pageUrl, html, options = {}) {
     this.pageUrl = new URL(pageUrl).href;
@@ -251,12 +273,16 @@ class PageSnapshot {
     const canonical = findCanonical($, this.pageUrl);
     const xRobotsTags = normalizeHeaderValues(options.responseHeaders?.['x-robots-tag']);
 
+    /** @type {import('../contracts').HeadingCounts} */
     const headingCounts = { h1: 0, h2: 0, h3: 0, h4: 0, h5: 0, h6: 0 };
+    /** @type {number[]} */
     const headingLevels = [];
+    /** @type {string[]} */
     const h1Texts = [];
     $('h1, h2, h3, h4, h5, h6').each((_index, element) => {
       const level = Number(element.tagName.slice(1));
-      headingCounts[`h${level}`] += 1;
+      const headingKey = /** @type {keyof import('../contracts').HeadingCounts} */ (`h${level}`);
+      headingCounts[headingKey] += 1;
       headingLevels.push(level);
       if (level === 1) h1Texts.push(normalizeWhitespace($(element).text()));
     });
@@ -293,6 +319,7 @@ class PageSnapshot {
     const tokens = tokenize(visibleText);
     const structuredData = extractStructuredData($);
 
+    /** @type {import('../contracts').AnalysisMetadata} */
     this.metadata = deepFreeze({
       title,
       titleLength: [...title].length,
@@ -313,6 +340,7 @@ class PageSnapshot {
         image: findMetaValues($, 'property', 'og:image')[0] || ''
       }
     });
+    /** @type {import('../contracts').AnalysisContent} */
     this.content = deepFreeze({
       words: { count: tokens.length, topKeywords: extractTopKeywords(tokens) },
       headings: { counts: headingCounts, h1Texts, skipsHeadingLevel },

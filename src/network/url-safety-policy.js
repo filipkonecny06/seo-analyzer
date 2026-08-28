@@ -11,6 +11,7 @@ const DEFAULT_ALLOWED_PORTS = Object.freeze([80, 443]);
 const BLOCKED_HOST_SUFFIXES = Object.freeze(['.localhost', '.local', '.internal', '.home.arpa']);
 const EMPTY_DNS_RESULT_CODES = new Set(['ENODATA', 'ENOTFOUND']);
 
+/** @param {string} hostname */
 function stripIpv6Brackets(hostname) {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 }
@@ -33,7 +34,7 @@ function normalizeAddress(address) {
   } catch (error) {
     throw new UrlPolicyError('The target host resolved to an invalid IP address.', {
       code: 'INVALID_RESOLVED_ADDRESS',
-      cause: error
+      cause: error instanceof Error ? error : undefined
     });
   }
 }
@@ -54,6 +55,7 @@ function assertPublicAddress(address) {
   return normalized;
 }
 
+/** @param {AbortSignal|undefined} signal */
 function signalReason(signal) {
   return signal?.reason instanceof Error
     ? signal.reason
@@ -64,15 +66,26 @@ function createDefaultResolver() {
   return new dns.Resolver();
 }
 
+/**
+ * @param {import('node:dns/promises').Resolver} resolver
+ * @param {'resolve4'|'resolve6'} method
+ * @param {string} hostname
+ * @param {4|6} family
+ */
 async function resolveAddressFamily(resolver, method, hostname, family) {
   try {
-    const records = await resolver[method](hostname);
-    return records.map((record) => ({
+    const records =
+      method === 'resolve4' ? await resolver.resolve4(hostname) : await resolver.resolve6(hostname);
+    const normalizedRecords = /** @type {Array<string|{address: string}>} */ (
+      /** @type {unknown} */ (records)
+    );
+    return normalizedRecords.map((record) => ({
       address: typeof record === 'string' ? record : record.address,
       family
     }));
   } catch (error) {
-    if (EMPTY_DNS_RESULT_CODES.has(error?.code)) return [];
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (EMPTY_DNS_RESULT_CODES.has(code)) return [];
     throw error;
   }
 }
@@ -82,6 +95,9 @@ async function resolveAddressFamily(resolver, method, hostname, family) {
  * Authorization returns a concrete address that callers must pin to the outbound connection.
  */
 class UrlSafetyPolicy {
+  /**
+   * @param {{resolverFactory?: () => import('node:dns/promises').Resolver, dnsTimeoutMs?: number, maxUrlLength?: number, allowedPorts?: number[], timers?: {setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout}}} [options]
+   */
   constructor(options = {}) {
     this.resolverFactory = options.resolverFactory || createDefaultResolver;
     this.dnsTimeoutMs = options.dnsTimeoutMs || 3000;
@@ -120,7 +136,7 @@ class UrlSafetyPolicy {
       throw new UrlPolicyError('Enter a valid HTTP or HTTPS URL.', {
         code: 'INVALID_URL',
         statusCode: 400,
-        cause: error
+        cause: error instanceof Error ? error : undefined
       });
     }
 
@@ -165,7 +181,7 @@ class UrlSafetyPolicy {
    *
    * @param {string|URL} input
    * @param {{signal?: AbortSignal}} [options]
-   * @returns {Promise<{url: URL, addresses: object[], selectedAddress: object}>}
+   * @returns {Promise<{url: URL, addresses: Array<{address: string, family: 4|6, range: string}>, selectedAddress: {address: string, family: 4|6, range: string}}>}
    */
   async authorize(input, options = {}) {
     if (options.signal?.aborted) throw signalReason(options.signal);
@@ -183,7 +199,9 @@ class UrlSafetyPolicy {
           statusCode: 400
         });
       }
-      resolved = records.map((record) => assertPublicAddress(record.address || record));
+      resolved = records.map((record) =>
+        assertPublicAddress(typeof record === 'string' ? record : record.address)
+      );
     }
 
     const unique = [
@@ -204,8 +222,11 @@ class UrlSafetyPolicy {
   async resolveWithTimeout(hostname, options = {}) {
     if (options.signal?.aborted) throw signalReason(options.signal);
 
+    /** @type {import('node:dns/promises').Resolver|undefined} */
     let resolver;
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
     let timer;
+    /** @type {(() => void)|undefined} */
     let abortHandler;
     try {
       resolver = this.resolverFactory();
@@ -217,20 +238,23 @@ class UrlSafetyPolicy {
       ) {
         throw new TypeError('The DNS resolver factory returned an invalid resolver.');
       }
+      const activeResolver = resolver;
 
       return await new Promise((resolve, reject) => {
         let settled = false;
 
+        /** @param {Array<{address: string, family: 4|6}>} records */
         const resolveOnce = (records) => {
           if (settled) return;
           settled = true;
           resolve(records);
         };
+        /** @param {unknown} error */
         const rejectAndCancel = (error) => {
           if (settled) return;
           settled = true;
           try {
-            resolver.cancel();
+            activeResolver.cancel();
           } catch (_cancelError) {
             // Preserve the safe timeout, cancellation, or lookup error selected by the caller.
           }
@@ -255,8 +279,8 @@ class UrlSafetyPolicy {
         if (settled) return;
         // The families are independent; resolving them concurrently avoids doubling DNS latency.
         Promise.all([
-          resolveAddressFamily(resolver, 'resolve4', hostname, 4),
-          resolveAddressFamily(resolver, 'resolve6', hostname, 6)
+          resolveAddressFamily(activeResolver, 'resolve4', hostname, 4),
+          resolveAddressFamily(activeResolver, 'resolve6', hostname, 6)
         ]).then(
           ([ipv4, ipv6]) => resolveOnce([...ipv4, ...ipv6]),
           (error) => rejectAndCancel(error)
@@ -270,11 +294,11 @@ class UrlSafetyPolicy {
       throw new UrlPolicyError('The target hostname could not be resolved.', {
         code: 'DNS_LOOKUP_FAILED',
         statusCode: 400,
-        cause: error
+        cause: error instanceof Error ? error : undefined
       });
     } finally {
       if (timer !== undefined) this.timers.clearTimeout(timer);
-      options.signal?.removeEventListener('abort', abortHandler);
+      if (abortHandler) options.signal?.removeEventListener('abort', abortHandler);
     }
   }
 
@@ -284,25 +308,32 @@ class UrlSafetyPolicy {
    * the DNS-rebinding gap between policy validation and connection establishment.
    *
    * @param {{address: string, family: 4|6}} selectedAddress
-   * @returns {Function}
+   * @returns {import('node:net').LookupFunction}
    */
   createPinnedLookup(selectedAddress) {
-    return (_hostname, options, callback) => {
+    /**
+     * @param {string} _hostname
+     * @param {{all?: boolean}|Function} options
+     * @param {Function} [callback]
+     */
+    const lookup = (_hostname, options, callback) => {
       let lookupOptions = options;
       let done = callback;
       if (typeof options === 'function') {
         done = options;
         lookupOptions = {};
       }
+      if (typeof done !== 'function') throw new TypeError('A DNS lookup callback is required.');
 
       queueMicrotask(() => {
-        if (lookupOptions && lookupOptions.all) {
+        if (typeof lookupOptions !== 'function' && lookupOptions.all) {
           done(null, [{ address: selectedAddress.address, family: selectedAddress.family }]);
           return;
         }
         done(null, selectedAddress.address, selectedAddress.family);
       });
     };
+    return /** @type {import('node:net').LookupFunction} */ (lookup);
   }
 }
 

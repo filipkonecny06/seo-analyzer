@@ -19,14 +19,15 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "lint": "eslint .",
+    "typecheck": "tsc --project jsconfig.json",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test",
     "test:coverage": "npm run test:coverage:server && npm run test:coverage:browser",
-    "test:coverage:server": "c8 --all --include=src/**/*.js --per-file --check-coverage --lines 85 --functions 80 --branches 60 --reports-dir=coverage/server --reporter=text --reporter=lcov node --test",
-    "test:coverage:browser": "c8 --all --include=public/**/*.mjs --per-file --check-coverage --lines 90 --functions 90 --branches 80 --reports-dir=coverage/browser --reporter=text --reporter=lcov node --test test/browser-analyzer-app.test.js test/browser-api-client.test.js test/browser-report-renderer.test.js test/browser-utils.test.js",
+    "test:coverage:server": "c8 --all --include=src/**/*.js --exclude=src/contracts.js --per-file --check-coverage --lines 85 --functions 80 --branches 60 --reports-dir=coverage/server --reporter=text --reporter=lcov node --test",
+    "test:coverage:browser": "c8 --all --include=public/**/*.mjs --per-file --check-coverage --lines 90 --functions 90 --branches 80 --reports-dir=coverage/browser --reporter=text --reporter=lcov node --test test/browser-analyzer-app.test.js test/browser-api-client.test.js test/browser-html-shell.test.js test/browser-report-renderer.test.js test/browser-utils.test.js",
     "audit:production": "npm audit --omit=dev --audit-level=moderate",
-    "check": "npm run lint && npm run format:check && npm run test:coverage"
+    "check": "npm run lint && npm run typecheck && npm run format:check && npm run test:coverage"
   },
   "engines": {
     "node": "^22.13.0 || ^24.0.0"
@@ -37,9 +38,11 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
     "c8": "^12.0.0",
     "eslint": "^10.9.1",
     "globals": "^17.11.0",
-    "prettier": "^3.9.6"
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2"
   }
 }

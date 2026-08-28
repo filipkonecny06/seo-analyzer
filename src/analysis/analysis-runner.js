@@ -1,11 +1,10 @@
 'use strict';
 
-// Runs CPU- and parser-heavy analysis either inline for tests or in a bounded worker for production.
-
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 const { AnalysisExecutionError } = require('../errors');
 
+/** @param {AbortSignal|undefined} signal */
 function abortError(signal) {
   return new AnalysisExecutionError('The page analysis was cancelled.', {
     code: 'ANALYSIS_ABORTED',
@@ -14,11 +13,139 @@ function abortError(signal) {
   });
 }
 
+/** @param {unknown} message */
+function invalidWorkerMessageError(message) {
+  const serializedError =
+    message && typeof message === 'object' && 'error' in message ? message.error : undefined;
+  const cause =
+    serializedError &&
+    typeof serializedError === 'object' &&
+    'message' in serializedError &&
+    typeof serializedError.message === 'string'
+      ? new Error(serializedError.message)
+      : undefined;
+  return new AnalysisExecutionError('The page could not be analyzed.', {
+    code: 'ANALYSIS_FAILED',
+    cause
+  });
+}
+
+/** @param {Error & {code?: string}} error */
+function workerRuntimeError(error) {
+  const resourceLimit = error.code === 'ERR_WORKER_OUT_OF_MEMORY';
+  return new AnalysisExecutionError(
+    resourceLimit
+      ? 'The page is too complex to analyze within the configured memory limit.'
+      : 'The page could not be analyzed.',
+    {
+      code: resourceLimit ? 'ANALYSIS_RESOURCE_LIMIT' : 'ANALYSIS_FAILED',
+      statusCode: resourceLimit ? 422 : 500,
+      expose: resourceLimit,
+      cause: error
+    }
+  );
+}
+
+/** @param {number} exitCode */
+function workerExitError(exitCode) {
+  if (exitCode === 0) {
+    return new AnalysisExecutionError('The analysis worker returned no report.', {
+      code: 'ANALYSIS_NO_RESULT'
+    });
+  }
+  return new AnalysisExecutionError('The page could not be analyzed.', {
+    code: 'ANALYSIS_FAILED',
+    cause: new Error(`Analysis worker exited with code ${exitCode}.`)
+  });
+}
+
+/** @param {Worker} worker */
+async function terminateWorker(worker) {
+  try {
+    await worker.terminate();
+  } catch (_terminationError) {
+    // Termination cannot change the analysis outcome already selected by message, timeout, or abort.
+  }
+}
+
 /**
- * Adapts a synchronous analyzer to the async runner contract for deterministic unit tests.
+ * Owns one worker's event, timeout, cancellation, and termination lifecycle.
  *
- * @param {{analyze(pageUrl: string, html: string|Buffer, options?: object): object}} analyzer
- * @returns {{analyze(pageUrl: string, html: string|Buffer, options?: object): Promise<object>}}
+ * @param {Worker} worker
+ * @param {{timeoutMs: number, signal?: AbortSignal, timers: {setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout}}} options
+ * @returns {Promise<import('../contracts').AnalysisReport>}
+ */
+function waitForWorkerReport(worker, options) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let timer;
+
+    const cleanup = () => {
+      if (timer !== undefined) options.timers.clearTimeout(timer);
+      options.signal?.removeEventListener('abort', handleAbort);
+      worker.removeListener('message', handleMessage);
+      worker.removeListener('error', handleError);
+      worker.removeListener('exit', handleExit);
+    };
+
+    /** @param {Error|null} error @param {import('../contracts').AnalysisReport} [report] */
+    const settle = (error, report) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      terminateWorker(worker).then(() => {
+        if (error) reject(error);
+        else resolve(/** @type {import('../contracts').AnalysisReport} */ (report));
+      });
+    };
+
+    const handleAbort = () => settle(abortError(options.signal));
+    /** @param {unknown} message */
+    const handleMessage = (message) => {
+      if (
+        message &&
+        typeof message === 'object' &&
+        'ok' in message &&
+        message.ok === true &&
+        'report' in message &&
+        message.report &&
+        typeof message.report === 'object'
+      ) {
+        settle(null, /** @type {import('../contracts').AnalysisReport} */ (message.report));
+        return;
+      }
+      settle(invalidWorkerMessageError(message));
+    };
+    /** @param {Error & {code?: string}} error */
+    const handleError = (error) => settle(workerRuntimeError(error));
+    /** @param {number} exitCode */
+    const handleExit = (exitCode) => settle(workerExitError(exitCode));
+
+    worker.once('message', handleMessage);
+    worker.once('error', handleError);
+    worker.once('exit', handleExit);
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+    if (options.signal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    timer = options.timers.setTimeout(() => {
+      settle(
+        new AnalysisExecutionError(`The page analysis exceeded ${options.timeoutMs} ms.`, {
+          code: 'ANALYSIS_TIMEOUT',
+          statusCode: 504,
+          expose: true
+        })
+      );
+    }, options.timeoutMs);
+  });
+}
+
+/**
+ * @param {{analyze(pageUrl: string, html: string|Buffer, options?: object): import('../contracts').AnalysisReport}} analyzer
+ * @returns {{analyze(pageUrl: string, html: string|Buffer, options?: {responseHeaders?: Record<string, string|string[]>, signal?: AbortSignal}): Promise<import('../contracts').AnalysisReport>}}
  */
 function createInlineAnalysisRunner(analyzer) {
   return {
@@ -30,10 +157,13 @@ function createInlineAnalysisRunner(analyzer) {
 }
 
 /**
- * Isolates HTML parsing in a worker with memory, stack, time, and cancellation limits.
- * A fresh worker per report also prevents malformed pages from retaining state between requests.
+ * Isolates parsing with memory, stack, time, and cancellation limits.
+ * A fresh worker also prevents malformed pages from retaining state between requests.
  */
 class WorkerAnalysisRunner {
+  /**
+   * @param {{timeoutMs?: number, maxOldGenerationSizeMb?: number, maxYoungGenerationSizeMb?: number, stackSizeMb?: number, workerPath?: string, workerFactory?: (workerData: object) => Worker, timers?: {setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout}}} [options]
+   */
   constructor(options = {}) {
     this.timeoutMs = options.timeoutMs || 5000;
     this.resourceLimits = Object.freeze({
@@ -53,12 +183,10 @@ class WorkerAnalysisRunner {
   }
 
   /**
-   * Starts one isolated analysis and terminates its worker on every completion path.
-   *
    * @param {string} pageUrl
    * @param {string|Buffer} html
-   * @param {{responseHeaders?: object, signal?: AbortSignal}} [options]
-   * @returns {Promise<object>}
+   * @param {{responseHeaders?: Record<string, string|string[]>, signal?: AbortSignal}} [options]
+   * @returns {Promise<import('../contracts').AnalysisReport>}
    */
   analyze(pageUrl, html, options = {}) {
     if (options.signal?.aborted) return Promise.reject(abortError(options.signal));
@@ -74,109 +202,15 @@ class WorkerAnalysisRunner {
       return Promise.reject(
         new AnalysisExecutionError('The page analysis could not be started.', {
           code: 'ANALYSIS_START_FAILED',
-          cause: error
+          cause: error instanceof Error ? error : undefined
         })
       );
     }
 
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let timer;
-
-      const cleanup = () => {
-        if (timer !== undefined) this.timers.clearTimeout(timer);
-        options.signal?.removeEventListener('abort', handleAbort);
-        worker.removeListener('message', handleMessage);
-        worker.removeListener('error', handleError);
-        worker.removeListener('exit', handleExit);
-      };
-
-      // Wait for the termination attempt before settling so worker cleanup precedes the outcome.
-      const settleAfterTermination = (error, report) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-
-        let termination;
-        try {
-          termination = worker.terminate();
-        } catch (_terminationError) {
-          termination = undefined;
-        }
-        // Worker termination errors cannot change the already selected analysis outcome.
-        Promise.resolve(termination)
-          .catch(() => undefined)
-          .then(() => {
-            if (error) reject(error);
-            else resolve(report);
-          });
-      };
-
-      const handleAbort = () => settleAfterTermination(abortError(options.signal));
-      const handleMessage = (message) => {
-        // Treat worker messages as a serialized boundary and require the expected envelope.
-        if (message?.ok === true && message.report && typeof message.report === 'object') {
-          settleAfterTermination(null, message.report);
-          return;
-        }
-        settleAfterTermination(
-          new AnalysisExecutionError('The page could not be analyzed.', {
-            code: 'ANALYSIS_FAILED',
-            cause: message?.error ? new Error(message.error.message) : undefined
-          })
-        );
-      };
-      const handleError = (error) => {
-        const resourceLimit = error?.code === 'ERR_WORKER_OUT_OF_MEMORY';
-        settleAfterTermination(
-          new AnalysisExecutionError(
-            resourceLimit
-              ? 'The page is too complex to analyze within the configured memory limit.'
-              : 'The page could not be analyzed.',
-            {
-              code: resourceLimit ? 'ANALYSIS_RESOURCE_LIMIT' : 'ANALYSIS_FAILED',
-              statusCode: resourceLimit ? 422 : 500,
-              expose: resourceLimit,
-              cause: error
-            }
-          )
-        );
-      };
-      const handleExit = (exitCode) => {
-        if (exitCode === 0) {
-          settleAfterTermination(
-            new AnalysisExecutionError('The analysis worker returned no report.', {
-              code: 'ANALYSIS_NO_RESULT'
-            })
-          );
-          return;
-        }
-        settleAfterTermination(
-          new AnalysisExecutionError('The page could not be analyzed.', {
-            code: 'ANALYSIS_FAILED',
-            cause: new Error(`Analysis worker exited with code ${exitCode}.`)
-          })
-        );
-      };
-
-      worker.once('message', handleMessage);
-      worker.once('error', handleError);
-      worker.once('exit', handleExit);
-      options.signal?.addEventListener('abort', handleAbort, { once: true });
-      if (options.signal?.aborted) {
-        handleAbort();
-        return;
-      }
-
-      timer = this.timers.setTimeout(() => {
-        settleAfterTermination(
-          new AnalysisExecutionError(`The page analysis exceeded ${this.timeoutMs} ms.`, {
-            code: 'ANALYSIS_TIMEOUT',
-            statusCode: 504,
-            expose: true
-          })
-        );
-      }, this.timeoutMs);
+    return waitForWorkerReport(worker, {
+      timeoutMs: this.timeoutMs,
+      timers: this.timers,
+      signal: options.signal
     });
   }
 }

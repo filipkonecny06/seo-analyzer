@@ -3,6 +3,17 @@
 import { ReportRenderer } from './report-renderer.mjs';
 import { displayNumber, getRequiredElement, isRecord } from './ui-utils.mjs';
 
+export const APP_SELECTORS = Object.freeze({
+  form: '#analyzer-form',
+  input: '#url-input',
+  button: '#analyze-button',
+  buttonLabel: '.button__label',
+  panel: '#analyzer-panel',
+  status: '#status',
+  error: '#error-message',
+  report: '#report'
+});
+
 /** User-facing request failure with enough context to mark invalid input accessibly. */
 export class AnalysisRequestError extends Error {
   /**
@@ -18,6 +29,7 @@ export class AnalysisRequestError extends Error {
 
 /** Thin transport adapter for the analyzer's JSON endpoint. */
 export class AnalysisApiClient {
+  /** @param {{fetchImpl?: typeof fetch, endpoint?: string}} [options] */
   constructor(options = {}) {
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
     this.endpoint = options.endpoint || '/api/analyze';
@@ -32,7 +44,7 @@ export class AnalysisApiClient {
    *
    * @param {string} rawUrl
    * @param {AbortSignal} signal
-   * @returns {Promise<object>}
+   * @returns {Promise<import('../src/contracts.js').AnalyzeSuccessResponse>}
    * @throws {AnalysisRequestError} For response-contract errors; network and abort errors propagate.
    */
   async fetchReport(rawUrl, signal) {
@@ -65,7 +77,7 @@ export class AnalysisApiClient {
       );
     }
 
-    return payload;
+    return /** @type {import('../src/contracts.js').AnalyzeSuccessResponse} */ (payload);
   }
 }
 
@@ -73,24 +85,41 @@ export class AnalysisApiClient {
 export class AnalyzerApp {
   /**
    * @param {Document} rootDocument
-   * @param {object} [options] Browser API and collaborator overrides used by tests.
+   * @param {{window?: Window, URLConstructor?: typeof URL, createAbortController?: () => AbortController, schedule?: (callback: FrameRequestCallback) => unknown, renderer?: ReportRenderer, apiClient?: AnalysisApiClient}} [options]
    */
   constructor(rootDocument, options = {}) {
     this.document = rootDocument;
-    this.window = options.window || rootDocument.defaultView;
+    const windowContext = options.window || rootDocument.defaultView;
+    if (!windowContext) throw new TypeError('AnalyzerApp requires a browser window.');
+    this.window = windowContext;
     this.URLConstructor = options.URLConstructor || URL;
     this.createAbortController = options.createAbortController || (() => new AbortController());
-    this.schedule = options.schedule || ((callback) => this.window.requestAnimationFrame(callback));
-    this.form = getRequiredElement(rootDocument, '#analyzer-form');
-    this.input = getRequiredElement(rootDocument, '#url-input');
-    this.button = getRequiredElement(rootDocument, '#analyze-button');
-    this.buttonLabel = getRequiredElement(this.button, '.button__label');
-    this.panel = getRequiredElement(rootDocument, '#analyzer-panel');
-    this.status = getRequiredElement(rootDocument, '#status');
-    this.error = getRequiredElement(rootDocument, '#error-message');
+    this.schedule =
+      options.schedule ||
+      ((/** @type {FrameRequestCallback} */ callback) =>
+        this.window.requestAnimationFrame(callback));
+    this.form = /** @type {HTMLFormElement} */ (
+      getRequiredElement(rootDocument, APP_SELECTORS.form)
+    );
+    this.input = /** @type {HTMLInputElement} */ (
+      getRequiredElement(rootDocument, APP_SELECTORS.input)
+    );
+    this.button = /** @type {HTMLButtonElement} */ (
+      getRequiredElement(rootDocument, APP_SELECTORS.button)
+    );
+    this.buttonLabel = /** @type {HTMLElement} */ (
+      getRequiredElement(this.button, APP_SELECTORS.buttonLabel)
+    );
+    this.panel = /** @type {HTMLElement} */ (getRequiredElement(rootDocument, APP_SELECTORS.panel));
+    this.status = /** @type {HTMLElement} */ (
+      getRequiredElement(rootDocument, APP_SELECTORS.status)
+    );
+    this.error = /** @type {HTMLElement} */ (getRequiredElement(rootDocument, APP_SELECTORS.error));
     this.renderer =
-      options.renderer || new ReportRenderer(getRequiredElement(rootDocument, '#report'));
+      options.renderer ||
+      new ReportRenderer(getRequiredElement(rootDocument, APP_SELECTORS.report));
     this.apiClient = options.apiClient || new AnalysisApiClient();
+    /** @type {{id: number, controller: AbortController}|null} */
     this.activeRequest = null;
     this.requestSequence = 0;
     this.initialized = false;
@@ -132,7 +161,10 @@ export class AnalyzerApp {
     this.abortActiveRequest();
   }
 
-  /** Validates input, runs one cancellable analysis, and renders its latest result. */
+  /**
+   * Validates input, runs one cancellable analysis, and renders its latest result.
+   * @param {Event} event
+   */
   async handleSubmit(event) {
     event.preventDefault();
 
@@ -181,7 +213,11 @@ export class AnalyzerApp {
         if (this.requestSequence === requestId) this.renderer.focus();
       });
     } catch (error) {
-      if (error?.name === 'AbortError' || !this.isCurrentRequest(requestId)) return;
+      if (
+        (error instanceof Error && error.name === 'AbortError') ||
+        !this.isCurrentRequest(requestId)
+      )
+        return;
 
       const message = error instanceof Error ? error.message : 'Unable to analyze this URL.';
       const invalidInput = error instanceof AnalysisRequestError && error.invalidInput;
@@ -227,11 +263,12 @@ export class AnalyzerApp {
     }
   }
 
-  /** Returns whether a completion still belongs to the active submission. */
+  /** @param {number} requestId Returns whether completion belongs to the active submission. */
   isCurrentRequest(requestId) {
     return this.activeRequest !== null && this.activeRequest.id === requestId;
   }
 
+  /** @param {boolean} isLoading */
   setLoading(isLoading) {
     this.button.disabled = isLoading;
     this.button.classList.toggle('is-loading', isLoading);
@@ -239,6 +276,7 @@ export class AnalyzerApp {
     this.panel.setAttribute('aria-busy', String(isLoading));
   }
 
+  /** @param {string} message */
   setStatus(message) {
     this.status.textContent = message;
   }
@@ -248,6 +286,7 @@ export class AnalyzerApp {
     this.error.textContent = '';
   }
 
+  /** @param {string} message @param {boolean} moveFocus */
   showError(message, moveFocus) {
     this.error.textContent = message;
     this.error.hidden = false;

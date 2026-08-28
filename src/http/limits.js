@@ -8,6 +8,7 @@
  * distributed limiter or trusted reverse proxy in front of each instance.
  */
 class InMemoryRateLimiter {
+  /** @param {{limit?: number, windowMs?: number, maxEntries?: number, clock?: () => number}} [options] */
   constructor(options = {}) {
     this.limit = options.limit || 10;
     this.windowMs = options.windowMs || 60_000;
@@ -41,7 +42,7 @@ class InMemoryRateLimiter {
     };
   }
 
-  /** Removes expired entries and enforces the memory bound without a background timer. */
+  /** @param {number} now Removes expired entries and enforces the bound without a timer. */
   prune(now) {
     for (const [key, entry] of this.entries) {
       if (entry.resetAt <= now || this.entries.size > this.maxEntries) this.entries.delete(key);

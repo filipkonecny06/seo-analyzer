@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const { describe, it } = require('node:test');
 const { PageSnapshot, SeoAnalyzer, analyzeHtml, normalizeUrl } = require('../src/analyzer');
-const { AnalysisRule } = require('../src/analysis/rules');
+const { AnalysisRule, RULE_THRESHOLDS, RULE_WEIGHTS } = require('../src/analysis/rules');
 
 function completeHtml() {
   const description = 'A'.repeat(130);
@@ -280,6 +280,14 @@ describe('SeoAnalyzer', () => {
   });
 
   it('enforces unique rule IDs and a stable 100-point registry', () => {
+    assert.equal(
+      Object.values(RULE_WEIGHTS).reduce((total, weight) => total + weight, 0),
+      100
+    );
+    assert.ok(Object.isFrozen(RULE_WEIGHTS));
+    assert.ok(Object.isFrozen(RULE_THRESHOLDS));
+    Object.values(RULE_THRESHOLDS).forEach((thresholds) => assert.ok(Object.isFrozen(thresholds)));
+
     class StubRule extends AnalysisRule {
       constructor(id, maxPoints) {
         super({ id, label: id, maxPoints });

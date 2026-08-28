@@ -6,6 +6,16 @@
 A Node.js application that fetches one public HTML page and reports common on-page SEO signals. Its
 100-point score is a review aid backed by visible checks and evidence, not a search-ranking forecast.
 
+## Quick start
+
+```bash
+npm ci
+npm start
+```
+
+Open <http://localhost:3000>. No account, database, or environment file is required for the default
+local setup. Node.js 24 is the repository's `.nvmrc` version.
+
 ## Demo access
 
 No credentials are required. The analyzer is intentionally available without an account: run it
@@ -46,7 +56,13 @@ src/
 │   ├── analysis-runner.js   # Isolated worker lifecycle, deadline, and limits
 │   ├── analysis-worker.js   # Worker entry point for parsing and scoring
 │   ├── page-snapshot.js     # Parse once and expose normalized evidence
-│   ├── rules.js             # Named rules and the default rule registry
+│   ├── rules.js             # Public rule exports and default registry order
+│   ├── rules/
+│   │   ├── base-rule.js     # Shared rule/result contract
+│   │   ├── content-rules.js # Content, heading, image, and JSON-LD checks
+│   │   ├── metadata-rules.js # Title, description, canonical, and social checks
+│   │   ├── policy.js        # Central weights, thresholds, and partial-score ratios
+│   │   └── robots-rule.js   # Robots directive parsing and scoring
 │   └── seo-analyzer.js      # Registry validation, scoring, prioritization
 ├── http/
 │   ├── create-server.js     # Routes, headers, static files, error contract
@@ -56,6 +72,7 @@ src/
 │   └── url-safety-policy.js # URL, DNS, IP, port, and credential policy
 ├── analyzer.js              # Small public analysis facade
 ├── config.js                # Validated environment configuration
+├── contracts.js             # Shared JSDoc contracts for server/browser boundaries
 ├── errors.js                # Safe operational error types
 └── version.js               # Application and methodology identifiers
 ```
@@ -209,6 +226,7 @@ Invalid configuration fails fast with a descriptive startup error.
 npm test                 # Node unit and integration tests
 npm run test:coverage    # Per-file coverage gates for server and browser behavior
 npm run lint             # ESLint flat config
+npm run typecheck        # Strict TypeScript checking over the JavaScript source
 npm run format           # Apply Prettier formatting
 npm run format:check     # Prettier verification
 npm run check            # All local quality gates
@@ -219,7 +237,8 @@ The suite covers parser regressions, Unicode keywords, scoring invariants, robot
 IPv4/IPv6 network classification, mixed DNS answers, redirect-to-private blocking, IP pinning,
 response and redirect-chain limits, cancellation, worker deadlines and termination, repeated robots
 headers, rate/concurrency behavior, HTTP contracts, security headers, traversal attempts, browser
-request races, safe DOM rendering, and deployment-file invariants. Per-file coverage gates apply
+request races, safe DOM rendering, the selectors required by the actual HTML shell, configuration
+documentation drift, and deployment-file invariants. Per-file coverage gates apply
 separately to server modules under `src/` and browser behavior modules under `public/*.mjs`. The
 two-line `public/app.js` bootstrap is checked as a static project invariant, and the root `server.js`
 bootstrap is exercised by the container smoke test.
@@ -228,11 +247,12 @@ bootstrap is exercised by the container smoke test.
 
 To add or change a check:
 
-1. Add a focused `AnalysisRule` subclass in `src/analysis/rules.js`.
-2. Give it a stable ID, user-facing label, maximum points, evidence, and actionable recommendation.
-3. Register it in `DEFAULT_RULES` and rebalance weights to exactly 100.
-4. Add pass/warn/fail fixtures in `test/analyzer.test.js`.
-5. Run `npm run check` and document material methodology changes.
+1. Add a focused `AnalysisRule` subclass to the appropriate module under `src/analysis/rules/`.
+2. Give it a stable ID, user-facing label, evidence, and an actionable recommendation.
+3. Define its weight and thresholds in `src/analysis/rules/policy.js`.
+4. Register it in `DEFAULT_RULES` and rebalance weights to exactly 100.
+5. Add pass/warn/fail fixtures in `test/analyzer.test.js`.
+6. Run `npm run check` and document material methodology changes.
 
 Parsing belongs in `PageSnapshot`; rules should evaluate normalized evidence rather than traverse the
 DOM independently. This keeps one parse per report and makes rule behavior easy to inspect.

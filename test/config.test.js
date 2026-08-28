@@ -1,14 +1,19 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { describe, it } = require('node:test');
 const {
+  ENV_DEFAULTS,
   loadConfig,
   parseAllowedPorts,
   parseBoolean,
   parseInteger,
   parseUserAgent
 } = require('../src/config');
+
+const projectRoot = path.resolve(__dirname, '..');
 
 describe('configuration', () => {
   it('loads typed defaults and explicit environment overrides', () => {
@@ -65,5 +70,26 @@ describe('configuration', () => {
       () => loadConfig({ OUTBOUND_USER_AGENT: 'Analyzer/2.0\tdebug' }),
       /OUTBOUND_USER_AGENT must not contain control characters/
     );
+  });
+
+  it('keeps documented environment defaults aligned with the runtime source of truth', () => {
+    const example = Object.fromEntries(
+      fs
+        .readFileSync(path.join(projectRoot, '.env.example'), 'utf8')
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith('#'))
+        .map((line) => line.split('=', 2))
+    );
+    assert.deepEqual(example, ENV_DEFAULTS);
+
+    const readmeLines = fs
+      .readFileSync(path.join(projectRoot, 'README.md'), 'utf8')
+      .split(/\r?\n/u);
+    Object.entries(ENV_DEFAULTS).forEach(([name, value]) => {
+      const row = readmeLines.find((line) => line.trimStart().startsWith(`| \`${name}\``));
+      assert.ok(row, `README configuration table must document ${name}`);
+      assert.ok(row.includes(`\`${value}\``), `README default for ${name} must be ${value}`);
+    });
   });
 });

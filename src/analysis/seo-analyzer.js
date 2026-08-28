@@ -10,7 +10,7 @@ const { METHODOLOGY_VERSION } = require('../version');
  * Maps the 100-point score to a familiar letter-grade summary.
  *
  * @param {number} score
- * @returns {'A'|'B'|'C'|'D'|'F'}
+ * @returns {import('../contracts').AnalysisGrade}
  */
 function gradeForScore(score) {
   if (score >= 90) return 'A';
@@ -22,6 +22,7 @@ function gradeForScore(score) {
 
 /** Evaluates an immutable page snapshot against a deterministic, weighted rule set. */
 class SeoAnalyzer {
+  /** @param {{rules?: import('../contracts').AnalysisRuleContract[]}} [options] */
   constructor(options = {}) {
     this.rules = Object.freeze([...(options.rules || DEFAULT_RULES)]);
     const identifiers = new Set(this.rules.map((rule) => rule.id));
@@ -40,8 +41,8 @@ class SeoAnalyzer {
    *
    * @param {string} pageUrl Base URL used to resolve page-relative metadata and links.
    * @param {string|Buffer} html
-   * @param {{responseHeaders?: object}} [options]
-   * @returns {object} The score, evidence, individual checks, and prioritized recommendations.
+   * @param {{responseHeaders?: Record<string, string|string[]>}} [options]
+   * @returns {import('../contracts').AnalysisReport}
    */
   analyze(pageUrl, html, options = {}) {
     const snapshot = new PageSnapshot(pageUrl, html, options);
@@ -54,7 +55,7 @@ class SeoAnalyzer {
         const priority = { fail: 0, warn: 1, pass: 2 };
         return priority[left.status] - priority[right.status] || right.maxPoints - left.maxPoints;
       })
-      .map((check) => check.recommendation);
+      .map((check) => /** @type {string} */ (check.recommendation));
 
     return {
       score,

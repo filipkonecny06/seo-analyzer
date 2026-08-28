@@ -1,7 +1,5 @@
 'use strict';
 
-// HTTP composition root: routes requests, serves static assets, and wires security dependencies.
-
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
@@ -24,7 +22,6 @@ const MIME_TYPES = Object.freeze({
   '.txt': 'text/plain; charset=utf-8'
 });
 
-// The browser UI is self-contained, so a restrictive policy needs no third-party exceptions.
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
@@ -38,8 +35,28 @@ const CONTENT_SECURITY_POLICY = [
   "style-src-attr 'unsafe-inline'"
 ].join('; ');
 
+/**
+ * @typedef {{analyze(pageUrl: string, html: string|Buffer, options?: {responseHeaders?: Record<string, string|string[]>, signal?: AbortSignal}): Promise<import('../contracts').AnalysisReport>}} AnalysisRunner
+ * @typedef {{fetch(target: string, options?: {signal?: AbortSignal}): Promise<import('../contracts').PageFetchResult>}} PageFetcher
+ * @typedef {{consume(key: string): {allowed: boolean, remaining: number, retryAfterSeconds: number}}} RateLimiter
+ * @typedef {{tryAcquire(): null|(() => void)}} AnalysisGate
+ * @typedef {{analysisRunner: AnalysisRunner, fetcher: PageFetcher, rateLimiter: RateLimiter, concurrencyGate: AnalysisGate}} ServerDependencies
+ * @typedef {{info?: (fields: Record<string, unknown>) => void, error?: (fields: {requestId: string, code: string, error: Error}) => void}} ServerLogger
+ * @typedef {object} ServerOptions
+ * @property {import('../contracts').RuntimeConfig} [config]
+ * @property {string} [publicDirectory]
+ * @property {ServerLogger} [logger]
+ * @property {() => Date} [clock]
+ * @property {import('../contracts').UrlSafetyPolicyContract} [urlSafetyPolicy]
+ * @property {AnalysisRunner} [analysisRunner]
+ * @property {{analyze(pageUrl: string, html: string|Buffer, options?: object): import('../contracts').AnalysisReport}} [analyzer]
+ * @property {PageFetcher} [fetcher]
+ * @property {RateLimiter} [rateLimiter]
+ * @property {AnalysisGate} [concurrencyGate]
+ */
+
+/** @param {import('node:http').ServerResponse} response @param {string} requestId */
 function setCommonHeaders(response, requestId) {
-  // These headers establish the baseline for every response, including errors and static files.
   response.setHeader('content-security-policy', CONTENT_SECURITY_POLICY);
   response.setHeader('cross-origin-opener-policy', 'same-origin');
   response.setHeader('permissions-policy', 'camera=(), geolocation=(), microphone=()');
@@ -49,16 +66,30 @@ function setCommonHeaders(response, requestId) {
   response.setHeader('x-request-id', requestId);
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {number} statusCode
+ * @param {Buffer} body
+ * @param {string} contentType
+ * @param {Record<string, string>} [extraHeaders]
+ */
 function sendBuffer(request, response, statusCode, body, contentType, extraHeaders = {}) {
-  const isHead = request.method === 'HEAD';
   response.writeHead(statusCode, {
     'content-type': contentType,
     'content-length': body.length,
     ...extraHeaders
   });
-  response.end(isHead ? undefined : body);
+  response.end(request.method === 'HEAD' ? undefined : body);
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {number} statusCode
+ * @param {object} payload
+ * @param {Record<string, string>} [extraHeaders]
+ */
 function sendJson(request, response, statusCode, payload, extraHeaders = {}) {
   const body = Buffer.from(JSON.stringify(payload));
   sendBuffer(request, response, statusCode, body, 'application/json; charset=utf-8', {
@@ -67,15 +98,18 @@ function sendJson(request, response, statusCode, payload, extraHeaders = {}) {
   });
 }
 
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {string[]} allowedMethods
+ */
 function methodNotAllowed(request, response, allowedMethods) {
   sendJson(
     request,
     response,
     405,
     { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed.' } },
-    {
-      allow: allowedMethods.join(', ')
-    }
+    { allow: allowedMethods.join(', ') }
   );
 }
 
@@ -85,7 +119,6 @@ function methodNotAllowed(request, response, allowedMethods) {
  * @param {string} publicDirectory
  * @param {string} pathname
  * @returns {string}
- * @throws {AppError} When the path is malformed or escapes the public directory.
  */
 function resolveStaticPath(publicDirectory, pathname) {
   let decoded;
@@ -96,7 +129,7 @@ function resolveStaticPath(publicDirectory, pathname) {
       code: 'INVALID_PATH_ENCODING',
       statusCode: 400,
       expose: true,
-      cause: error
+      cause: error instanceof Error ? error : undefined
     });
   }
   if (decoded.includes('\0') || decoded.includes('\\')) {
@@ -125,12 +158,8 @@ function resolveStaticPath(publicDirectory, pathname) {
 }
 
 /**
- * Selects the rate-limit identity for a request.
- * Forwarded addresses are trusted only when the operator explicitly enables proxy trust.
- *
  * @param {import('node:http').IncomingMessage} request
  * @param {boolean} trustProxy
- * @returns {string}
  */
 function getClientAddress(request, trustProxy) {
   if (trustProxy) {
@@ -142,8 +171,12 @@ function getClientAddress(request, trustProxy) {
   return request.socket.remoteAddress || 'unknown';
 }
 
+/**
+ * @param {import('../contracts').RuntimeConfig} config
+ * @param {ServerOptions} overrides
+ * @returns {ServerDependencies}
+ */
 function createDependencies(config, overrides) {
-  // Constructor overrides keep unit tests deterministic without changing production composition.
   const urlSafetyPolicy =
     overrides.urlSafetyPolicy ||
     new UrlSafetyPolicy({
@@ -178,193 +211,258 @@ function createDependencies(config, overrides) {
   };
 }
 
+/** @param {import('node:http').IncomingMessage} request */
+function parseRequestUrl(request) {
+  try {
+    return new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+  } catch (error) {
+    throw new AppError('The request URL is invalid.', {
+      code: 'INVALID_REQUEST_URL',
+      statusCode: 400,
+      expose: true,
+      cause: error instanceof Error ? error : undefined
+    });
+  }
+}
+
 /**
- * Creates the application server without listening, allowing the process entry point to own ports
- * and shutdown while tests can bind ephemeral ports.
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ */
+function handleHealthRequest(request, response) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    methodNotAllowed(request, response, ['GET', 'HEAD']);
+    return;
+  }
+  sendJson(request, response, 200, { ok: true, status: 'up', version: APPLICATION_VERSION });
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {ServerDependencies} dependencies
+ * @param {import('../contracts').RuntimeConfig} config
+ */
+function admitRateLimitedRequest(request, response, dependencies, config) {
+  const rate = dependencies.rateLimiter.consume(getClientAddress(request, config.trustProxy));
+  response.setHeader('ratelimit-limit', String(config.rateLimitMax));
+  response.setHeader('ratelimit-remaining', String(rate.remaining));
+  if (rate.allowed) return true;
+
+  sendJson(
+    request,
+    response,
+    429,
+    {
+      ok: false,
+      error: { code: 'RATE_LIMITED', message: 'Too many analyses. Try again shortly.' }
+    },
+    { 'retry-after': String(rate.retryAfterSeconds) }
+  );
+  return false;
+}
+
+/**
+ * Holds the concurrency permit until fetch, analysis, and worker termination have all completed.
  *
- * @param {object} [options] Validated config and optional dependency overrides.
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {string} target
+ * @param {ServerDependencies} dependencies
+ * @param {() => void} release
+ * @param {() => Date} clock
+ */
+async function executeAnalysisRequest(request, response, target, dependencies, release, clock) {
+  // A disconnected client no longer needs network or worker resources, so cancel both layers.
+  const clientAbortController = new AbortController();
+  const abortClientRequest = () => {
+    if (!clientAbortController.signal.aborted) clientAbortController.abort();
+  };
+  const abortClosedResponse = () => {
+    if (!response.writableEnded) abortClientRequest();
+  };
+  request.once('aborted', abortClientRequest);
+  response.once('close', abortClosedResponse);
+  if (request.aborted || response.destroyed) abortClientRequest();
+
+  try {
+    const page = await dependencies.fetcher.fetch(target, {
+      signal: clientAbortController.signal
+    });
+    const report = await dependencies.analysisRunner.analyze(page.finalUrl, page.html, {
+      responseHeaders: page.responseHeaders,
+      signal: clientAbortController.signal
+    });
+    /** @type {import('../contracts').AnalyzeSuccessResponse} */
+    const payload = {
+      ok: true,
+      url: page.finalUrl,
+      fetchedAt: clock().toISOString(),
+      network: { redirectCount: page.redirectCount },
+      report
+    };
+    sendJson(request, response, 200, payload);
+  } finally {
+    request.removeListener('aborted', abortClientRequest);
+    response.removeListener('close', abortClosedResponse);
+    release();
+  }
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {URL} requestUrl
+ * @param {ServerDependencies} dependencies
+ * @param {import('../contracts').RuntimeConfig} config
+ * @param {() => Date} clock
+ */
+async function handleAnalyzeRequest(request, response, requestUrl, dependencies, config, clock) {
+  if (request.method !== 'GET') {
+    methodNotAllowed(request, response, ['GET']);
+    return;
+  }
+  // Consume allowance before validation so malformed requests cannot bypass admission controls.
+  if (!admitRateLimitedRequest(request, response, dependencies, config)) return;
+
+  const target = requestUrl.searchParams.get('url');
+  if (!target) {
+    sendJson(request, response, 400, {
+      ok: false,
+      error: { code: 'MISSING_URL', message: 'The url query parameter is required.' }
+    });
+    return;
+  }
+
+  // Reject at capacity instead of retaining incoming requests in an unbounded queue.
+  const release = dependencies.concurrencyGate.tryAcquire();
+  if (!release) {
+    sendJson(
+      request,
+      response,
+      503,
+      {
+        ok: false,
+        error: { code: 'ANALYZER_BUSY', message: 'The analyzer is busy. Try again shortly.' }
+      },
+      { 'retry-after': '1' }
+    );
+    return;
+  }
+
+  await executeAnalysisRequest(request, response, target, dependencies, release, clock);
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {URL} requestUrl
+ * @param {string} publicDirectory
+ */
+async function serveStaticRequest(request, response, requestUrl, publicDirectory) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    methodNotAllowed(request, response, ['GET', 'HEAD']);
+    return;
+  }
+
+  const filePath = resolveStaticPath(publicDirectory, requestUrl.pathname);
+  let body;
+  try {
+    body = await fs.readFile(filePath);
+  } catch (error) {
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error ? error.code : undefined;
+    if (errorCode === 'ENOENT' || errorCode === 'EISDIR') {
+      sendBuffer(request, response, 404, Buffer.from('Not Found'), 'text/plain; charset=utf-8', {
+        'cache-control': 'no-store'
+      });
+      return;
+    }
+    throw error;
+  }
+
+  const contentType =
+    /** @type {Record<string, string>} */ (MIME_TYPES)[path.extname(filePath).toLowerCase()] ||
+    'application/octet-stream';
+  sendBuffer(request, response, 200, body, contentType, { 'cache-control': 'no-cache' });
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {{config: import('../contracts').RuntimeConfig, dependencies: ServerDependencies, publicDirectory: string, clock: () => Date}} context
+ */
+async function routeRequest(request, response, context) {
+  const requestUrl = parseRequestUrl(request);
+  if (requestUrl.pathname === '/api/health') {
+    handleHealthRequest(request, response);
+    return;
+  }
+  if (requestUrl.pathname === '/api/analyze') {
+    await handleAnalyzeRequest(
+      request,
+      response,
+      requestUrl,
+      context.dependencies,
+      context.config,
+      context.clock
+    );
+    return;
+  }
+  if (requestUrl.pathname.startsWith('/api/')) {
+    sendJson(request, response, 404, {
+      ok: false,
+      error: { code: 'NOT_FOUND', message: 'API endpoint not found.' }
+    });
+    return;
+  }
+  await serveStaticRequest(request, response, requestUrl, context.publicDirectory);
+}
+
+/**
+ * @param {unknown} error
+ * @param {import('node:http').IncomingMessage} request
+ * @param {import('node:http').ServerResponse} response
+ * @param {ServerLogger} logger
+ * @param {string} requestId
+ */
+function handleRequestError(error, request, response, logger, requestId) {
+  if (response.headersSent || response.destroyed || response.writableEnded) {
+    response.destroy();
+    return;
+  }
+  const appError = error instanceof Error ? error : new Error('Unknown server error');
+  const statusCode = 'statusCode' in appError ? Number(appError.statusCode) || 500 : 500;
+  const code =
+    'code' in appError && typeof appError.code === 'string' ? appError.code : 'INTERNAL_ERROR';
+  const expose = 'expose' in appError && appError.expose === true;
+  const message = expose ? appError.message : 'An unexpected error occurred.';
+  if (statusCode >= 500) logger.error?.({ requestId, code, error: appError });
+  sendJson(request, response, statusCode, { ok: false, error: { code, message } });
+}
+
+/**
+ * Creates the application server without listening so the process entry point owns ports/shutdown.
+ *
+ * @param {ServerOptions} [options]
  * @returns {import('node:http').Server}
  */
 function createServer(options = {}) {
   const config = options.config || loadConfig();
-  const publicDirectory = options.publicDirectory || path.resolve(__dirname, '../../public');
+  const context = {
+    config,
+    dependencies: createDependencies(config, options),
+    publicDirectory: options.publicDirectory || path.resolve(__dirname, '../../public'),
+    clock: options.clock || (() => new Date())
+  };
   const logger = options.logger || console;
-  const clock = options.clock || (() => new Date());
-  const dependencies = createDependencies(config, options);
 
   const server = http.createServer((request, response) => {
     const requestId = crypto.randomUUID();
     setCommonHeaders(response, requestId);
-
-    // Start one promise chain per request so async routing failures reach the central handler.
-    Promise.resolve()
-      .then(async () => {
-        let requestUrl;
-        try {
-          requestUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-        } catch (error) {
-          throw new AppError('The request URL is invalid.', {
-            code: 'INVALID_REQUEST_URL',
-            statusCode: 400,
-            expose: true,
-            cause: error
-          });
-        }
-
-        if (requestUrl.pathname === '/api/health') {
-          if (request.method !== 'GET' && request.method !== 'HEAD') {
-            methodNotAllowed(request, response, ['GET', 'HEAD']);
-            return;
-          }
-          sendJson(request, response, 200, {
-            ok: true,
-            status: 'up',
-            version: APPLICATION_VERSION
-          });
-          return;
-        }
-
-        if (requestUrl.pathname === '/api/analyze') {
-          if (request.method !== 'GET') {
-            methodNotAllowed(request, response, ['GET']);
-            return;
-          }
-
-          // Rate limiting precedes validation so malformed requests still consume client allowance.
-          const rate = dependencies.rateLimiter.consume(
-            getClientAddress(request, config.trustProxy)
-          );
-          response.setHeader('ratelimit-limit', String(config.rateLimitMax));
-          response.setHeader('ratelimit-remaining', String(rate.remaining));
-          if (!rate.allowed) {
-            sendJson(
-              request,
-              response,
-              429,
-              {
-                ok: false,
-                error: { code: 'RATE_LIMITED', message: 'Too many analyses. Try again shortly.' }
-              },
-              { 'retry-after': String(rate.retryAfterSeconds) }
-            );
-            return;
-          }
-
-          const target = requestUrl.searchParams.get('url');
-          if (!target) {
-            sendJson(request, response, 400, {
-              ok: false,
-              error: { code: 'MISSING_URL', message: 'The url query parameter is required.' }
-            });
-            return;
-          }
-
-          // Reject at capacity instead of retaining incoming requests in an unbounded queue.
-          const release = dependencies.concurrencyGate.tryAcquire();
-          if (!release) {
-            sendJson(
-              request,
-              response,
-              503,
-              {
-                ok: false,
-                error: {
-                  code: 'ANALYZER_BUSY',
-                  message: 'The analyzer is busy. Try again shortly.'
-                }
-              },
-              { 'retry-after': '1' }
-            );
-            return;
-          }
-
-          // A disconnected client no longer needs network or worker resources, so cancel both layers.
-          const clientAbortController = new AbortController();
-          const abortClientRequest = () => {
-            if (!clientAbortController.signal.aborted) clientAbortController.abort();
-          };
-          const abortClosedResponse = () => {
-            if (!response.writableEnded) abortClientRequest();
-          };
-          request.once('aborted', abortClientRequest);
-          response.once('close', abortClosedResponse);
-          if (request.aborted || response.destroyed) abortClientRequest();
-
-          try {
-            const page = await dependencies.fetcher.fetch(target, {
-              signal: clientAbortController.signal
-            });
-            const report = await dependencies.analysisRunner.analyze(page.finalUrl, page.html, {
-              responseHeaders: page.responseHeaders,
-              signal: clientAbortController.signal
-            });
-            sendJson(request, response, 200, {
-              ok: true,
-              url: page.finalUrl,
-              fetchedAt: clock().toISOString(),
-              network: { redirectCount: page.redirectCount },
-              report
-            });
-          } finally {
-            // The slot and listeners must be released on success, failure, and cancellation alike.
-            request.removeListener('aborted', abortClientRequest);
-            response.removeListener('close', abortClosedResponse);
-            release();
-          }
-          return;
-        }
-
-        if (requestUrl.pathname.startsWith('/api/')) {
-          sendJson(request, response, 404, {
-            ok: false,
-            error: { code: 'NOT_FOUND', message: 'API endpoint not found.' }
-          });
-          return;
-        }
-
-        if (request.method !== 'GET' && request.method !== 'HEAD') {
-          methodNotAllowed(request, response, ['GET', 'HEAD']);
-          return;
-        }
-
-        const filePath = resolveStaticPath(publicDirectory, requestUrl.pathname);
-        let body;
-        try {
-          body = await fs.readFile(filePath);
-        } catch (error) {
-          if (error.code === 'ENOENT' || error.code === 'EISDIR') {
-            sendBuffer(
-              request,
-              response,
-              404,
-              Buffer.from('Not Found'),
-              'text/plain; charset=utf-8',
-              {
-                'cache-control': 'no-store'
-              }
-            );
-            return;
-          }
-          throw error;
-        }
-        const contentType =
-          MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
-        sendBuffer(request, response, 200, body, contentType, { 'cache-control': 'no-cache' });
-      })
-      .catch((error) => {
-        // Once bytes have been sent, destroying the stream is safer than attempting a second reply.
-        if (response.headersSent || response.destroyed || response.writableEnded) {
-          response.destroy();
-          return;
-        }
-        const statusCode = Number(error.statusCode) || 500;
-        const code = error.code || 'INTERNAL_ERROR';
-        const message = error.expose ? error.message : 'An unexpected error occurred.';
-        if (statusCode >= 500) {
-          logger.error?.({ requestId, code, error });
-        }
-        sendJson(request, response, statusCode, { ok: false, error: { code, message } });
-      });
+    routeRequest(request, response, context).catch((error) => {
+      handleRequestError(error, request, response, logger, requestId);
+    });
   });
 
   // Bound header and request lifetimes independently to reduce slow-client resource retention.
