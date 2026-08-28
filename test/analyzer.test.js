@@ -31,7 +31,7 @@ function completeHtml() {
 }
 
 describe('SeoAnalyzer', () => {
-  it('produces a perfect, evidence-rich report for a complete document', () => {
+  it('returns 100 points and extracted evidence for a complete document', () => {
     const report = analyzeHtml('https://example.com/guide', completeHtml());
 
     assert.equal(report.score, 100);
@@ -68,7 +68,7 @@ describe('SeoAnalyzer', () => {
     assert.deepEqual(snapshot.content.headings.h1Texts, ['Visible heading']);
   });
 
-  it('treats robots none and X-Robots-Tag noindex as restrictive', () => {
+  it('treats robots, googlebot, and X-Robots-Tag noindex as restrictive', () => {
     const metaReport = analyzeHtml(
       'https://example.com',
       '<html lang="en"><head><meta name="robots" content="none"></head><body><h1>Page</h1></body></html>'
@@ -78,9 +78,60 @@ describe('SeoAnalyzer', () => {
       '<html lang="en"><body><h1>Page</h1></body></html>',
       { responseHeaders: { 'x-robots-tag': 'googlebot: noindex' } }
     );
+    const googlebotReport = analyzeHtml(
+      'https://example.com',
+      '<html lang="en"><head><meta name="googlebot" content="noindex"></head><body><h1>Page</h1></body></html>'
+    );
 
     assert.equal(metaReport.checks.find((check) => check.id === 'robots').status, 'fail');
     assert.equal(headerReport.checks.find((check) => check.id === 'robots').status, 'fail');
+    assert.equal(googlebotReport.metadata.googlebot, 'noindex');
+    assert.equal(googlebotReport.checks.find((check) => check.id === 'robots').status, 'fail');
+  });
+
+  it('ignores X-Robots-Tag directives scoped to unrelated crawlers', () => {
+    const genericReport = analyzeHtml(
+      'https://example.com',
+      '<html lang="en"><body><h1>Page</h1></body></html>',
+      { responseHeaders: { 'x-robots-tag': 'max-snippet: 120, noindex' } }
+    );
+    const unrelatedCrawlerReport = analyzeHtml(
+      'https://example.com',
+      '<html lang="en"><body><h1>Page</h1></body></html>',
+      { responseHeaders: { 'x-robots-tag': 'adsbot-google: noindex, nofollow' } }
+    );
+    const mixedScopeReport = analyzeHtml(
+      'https://example.com',
+      '<html lang="en"><body><h1>Page</h1></body></html>',
+      {
+        responseHeaders: {
+          'x-robots-tag': 'adsbot-google: noindex, googlebot: nofollow'
+        }
+      }
+    );
+
+    assert.equal(genericReport.checks.find((check) => check.id === 'robots').status, 'fail');
+    assert.equal(
+      unrelatedCrawlerReport.checks.find((check) => check.id === 'robots').status,
+      'pass'
+    );
+    assert.equal(mixedScopeReport.checks.find((check) => check.id === 'robots').status, 'warn');
+  });
+
+  it('resets crawler scope for each distinct X-Robots-Tag field line', () => {
+    const report = analyzeHtml(
+      'https://example.com',
+      '<html lang="en"><body><h1>Page</h1></body></html>',
+      {
+        responseHeaders: {
+          'x-robots-tag': ['bingbot: noindex', 'nofollow']
+        }
+      }
+    );
+
+    assert.deepEqual(report.metadata.xRobotsTags, ['bingbot: noindex', 'nofollow']);
+    assert.equal(report.metadata.xRobotsTag, 'bingbot: noindex, nofollow');
+    assert.equal(report.checks.find((check) => check.id === 'robots').status, 'warn');
   });
 
   it('distinguishes decorative images from omitted alt attributes', () => {
@@ -109,11 +160,96 @@ describe('SeoAnalyzer', () => {
 
     assert.deepEqual(report.content.structuredData, {
       total: 2,
-      valid: 1,
+      parseable: 1,
+      typed: 1,
+      untyped: 0,
       invalid: 1,
       types: ['WebPage']
     });
     assert.equal(report.checks.find((check) => check.id === 'structured-data').status, 'warn');
+  });
+
+  it('does not award a structured-data pass to empty or untyped JSON values', () => {
+    const report = analyzeHtml(
+      'https://example.com',
+      `<html lang="en"><body><h1>Page</h1>
+        <script type="application/ld+json">{}</script>
+        <script type="application/ld+json">[]</script>
+      </body></html>`
+    );
+
+    assert.deepEqual(report.content.structuredData, {
+      total: 2,
+      parseable: 2,
+      typed: 0,
+      untyped: 2,
+      invalid: 0,
+      types: []
+    });
+    const check = report.checks.find((candidate) => candidate.id === 'structured-data');
+    assert.equal(check.status, 'warn');
+    assert.equal(check.points, 0);
+    assert.match(check.detail, /none declares a non-empty @type/);
+  });
+
+  it('discovers deterministic types in graphs and nested JSON-LD entities', () => {
+    const report = analyzeHtml(
+      'https://example.com',
+      `<html lang="en"><body><h1>Page</h1>
+        <script type="application/ld+json">{
+          "@context":"https://schema.org",
+          "@graph":[{
+            "@type":["WebPage","Article",""],
+            "mainEntity":{"@type":"Person"},
+            "publisher":{"details":{"@type":"Organization"}}
+          }]
+        }</script>
+      </body></html>`
+    );
+
+    assert.deepEqual(report.content.structuredData, {
+      total: 1,
+      parseable: 1,
+      typed: 1,
+      untyped: 0,
+      invalid: 0,
+      types: ['Article', 'Organization', 'Person', 'WebPage']
+    });
+    const check = report.checks.find((candidate) => candidate.id === 'structured-data');
+    assert.equal(check.status, 'pass');
+    assert.equal(check.points, 5);
+  });
+
+  it('does not mistake JSON-LD context type coercion for an entity type', () => {
+    const report = analyzeHtml(
+      'https://example.com',
+      `<html lang="en"><body><h1>Page</h1>
+        <script type="application/ld+json">{
+          "@context":{"image":{"@type":"@id"}},
+          "name":"Untyped page"
+        }</script>
+      </body></html>`
+    );
+
+    assert.deepEqual(report.content.structuredData.types, []);
+    const check = report.checks.find((candidate) => candidate.id === 'structured-data');
+    assert.equal(check.status, 'warn');
+    assert.equal(check.points, 0);
+  });
+
+  it('warns when typed JSON-LD is mixed with an untyped block', () => {
+    const report = analyzeHtml(
+      'https://example.com',
+      `<html lang="en"><body><h1>Page</h1>
+        <script type="application/ld+json">{"@type":"WebPage"}</script>
+        <script type="application/ld+json">{"name":"Page"}</script>
+      </body></html>`
+    );
+
+    const check = report.checks.find((candidate) => candidate.id === 'structured-data');
+    assert.equal(check.status, 'warn');
+    assert.equal(check.points, 4);
+    assert.match(check.detail, /1 typed and 1 untyped/);
   });
 
   it('extracts and ranks Unicode keywords deterministically', () => {

@@ -4,11 +4,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const http = require('node:http');
 const path = require('node:path');
-const { SeoAnalyzer } = require('../analysis/seo-analyzer');
+const { WorkerAnalysisRunner, createInlineAnalysisRunner } = require('../analysis/analysis-runner');
 const { loadConfig } = require('../config');
 const { AppError } = require('../errors');
 const { SafePageFetcher } = require('../network/safe-page-fetcher');
 const { UrlSafetyPolicy } = require('../network/url-safety-policy');
+const { APPLICATION_VERSION } = require('../version');
 const { ConcurrencyGate, InMemoryRateLimiter } = require('./limits');
 
 const MIME_TYPES = Object.freeze({
@@ -16,6 +17,7 @@ const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.txt': 'text/plain; charset=utf-8'
 });
@@ -129,7 +131,16 @@ function createDependencies(config, overrides) {
       maxUrlLength: config.maxUrlLength
     });
   return {
-    analyzer: overrides.analyzer || new SeoAnalyzer(),
+    analysisRunner:
+      overrides.analysisRunner ||
+      (overrides.analyzer
+        ? createInlineAnalysisRunner(overrides.analyzer)
+        : new WorkerAnalysisRunner({
+            timeoutMs: config.analysisTimeoutMs,
+            maxOldGenerationSizeMb: config.analysisMaxOldSpaceMb,
+            maxYoungGenerationSizeMb: config.analysisMaxYoungSpaceMb,
+            stackSizeMb: config.analysisStackSizeMb
+          })),
     fetcher:
       overrides.fetcher ||
       new SafePageFetcher({
@@ -176,7 +187,11 @@ function createServer(options = {}) {
             methodNotAllowed(request, response, ['GET', 'HEAD']);
             return;
           }
-          sendJson(request, response, 200, { ok: true, status: 'up', version: '2.0.0' });
+          sendJson(request, response, 200, {
+            ok: true,
+            status: 'up',
+            version: APPLICATION_VERSION
+          });
           return;
         }
 
@@ -232,10 +247,24 @@ function createServer(options = {}) {
             return;
           }
 
+          const clientAbortController = new AbortController();
+          const abortClientRequest = () => {
+            if (!clientAbortController.signal.aborted) clientAbortController.abort();
+          };
+          const abortClosedResponse = () => {
+            if (!response.writableEnded) abortClientRequest();
+          };
+          request.once('aborted', abortClientRequest);
+          response.once('close', abortClosedResponse);
+          if (request.aborted || response.destroyed) abortClientRequest();
+
           try {
-            const page = await dependencies.fetcher.fetch(target);
-            const report = dependencies.analyzer.analyze(page.finalUrl, page.html, {
-              responseHeaders: page.responseHeaders
+            const page = await dependencies.fetcher.fetch(target, {
+              signal: clientAbortController.signal
+            });
+            const report = await dependencies.analysisRunner.analyze(page.finalUrl, page.html, {
+              responseHeaders: page.responseHeaders,
+              signal: clientAbortController.signal
             });
             sendJson(request, response, 200, {
               ok: true,
@@ -245,6 +274,8 @@ function createServer(options = {}) {
               report
             });
           } finally {
+            request.removeListener('aborted', abortClientRequest);
+            response.removeListener('close', abortClosedResponse);
             release();
           }
           return;
@@ -288,7 +319,7 @@ function createServer(options = {}) {
         sendBuffer(request, response, 200, body, contentType, { 'cache-control': 'no-cache' });
       })
       .catch((error) => {
-        if (response.headersSent) {
+        if (response.headersSent || response.destroyed || response.writableEnded) {
           response.destroy();
           return;
         }

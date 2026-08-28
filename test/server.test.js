@@ -1,8 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const http = require('node:http');
 const { afterEach, describe, it } = require('node:test');
+const { version: applicationVersion } = require('../package.json');
+const { WorkerAnalysisRunner } = require('../src/analysis/analysis-runner');
 const { loadConfig } = require('../src/config');
 const { UrlPolicyError } = require('../src/errors');
 const { createServer } = require('../src/http/create-server');
@@ -71,6 +74,7 @@ async function startServer(options = {}) {
     config: testConfig(options.config),
     fetcher,
     analyzer,
+    analysisRunner: options.analysisRunner,
     rateLimiter: options.rateLimiter,
     concurrencyGate: options.concurrencyGate,
     clock: () => new Date('2026-08-28T00:00:00.000Z'),
@@ -107,16 +111,23 @@ describe('HTTP server', () => {
   it('serves the frontend and health endpoint with hardened headers and HEAD support', async () => {
     const { origin } = await startServer();
     const home = await fetch(`${origin}/`);
-    const health = await fetch(`${origin}/api/health`, { method: 'HEAD' });
+    const browserModule = await fetch(`${origin}/analyzer-app.mjs`);
+    const health = await fetch(`${origin}/api/health`);
+    const healthHead = await fetch(`${origin}/api/health`, { method: 'HEAD' });
 
     assert.equal(home.status, 200);
     assert.match(await home.text(), /<title>On-Page SEO Analyzer<\/title>/);
     assert.match(home.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     assert.equal(home.headers.get('x-content-type-options'), 'nosniff');
     assert.ok(home.headers.get('x-request-id'));
+    assert.equal(browserModule.status, 200);
+    assert.match(browserModule.headers.get('content-type'), /^text\/javascript/);
+    assert.match(await browserModule.text(), /export class AnalyzerApp/);
     assert.equal(health.status, 200);
-    assert.equal(await health.text(), '');
-    assert.ok(Number(health.headers.get('content-length')) > 0);
+    assert.deepEqual(await health.json(), { ok: true, status: 'up', version: applicationVersion });
+    assert.equal(healthHead.status, 200);
+    assert.equal(await healthHead.text(), '');
+    assert.ok(Number(healthHead.headers.get('content-length')) > 0);
   });
 
   it('returns a stable analysis contract and passes response headers to the analyzer', async () => {
@@ -148,7 +159,8 @@ describe('HTTP server', () => {
     assert.deepEqual(payload.network, { redirectCount: 2 });
     assert.equal(payload.report.score, 91);
     assert.equal(analyzerArguments[0], 'https://example.com/final');
-    assert.deepEqual(analyzerArguments[2], { responseHeaders: { 'x-robots-tag': 'index' } });
+    assert.deepEqual(analyzerArguments[2].responseHeaders, { 'x-robots-tag': 'index' });
+    assert.equal(analyzerArguments[2].signal.aborted, false);
   });
 
   it('returns structured 400, 404, and 405 errors', async () => {
@@ -214,8 +226,13 @@ describe('HTTP server', () => {
 
   it('rejects excess concurrent analyses without leaking a permit', async () => {
     let releaseFetch;
+    let markFetchStarted;
+    const fetchStarted = new Promise((resolve) => {
+      markFetchStarted = resolve;
+    });
     const fetcher = {
       fetch() {
+        markFetchStarted();
         return new Promise((resolve) => {
           releaseFetch = () =>
             resolve({
@@ -232,7 +249,7 @@ describe('HTTP server', () => {
       concurrencyGate: new ConcurrencyGate(1)
     });
     const firstPromise = fetch(`${origin}/api/analyze?url=example.com`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await fetchStarted;
     const busy = await fetch(`${origin}/api/analyze?url=second.example`);
 
     assert.equal(busy.status, 503);
@@ -240,6 +257,96 @@ describe('HTTP server', () => {
     releaseFetch();
     assert.equal((await firstPromise).status, 200);
   });
+
+  it(
+    'cancels outbound work and releases its permit after a client disconnects',
+    { timeout: 2000 },
+    async () => {
+      let markFetchStarted;
+      let markFetchCancelled;
+      let observedSignal;
+      const fetchStarted = new Promise((resolve) => {
+        markFetchStarted = resolve;
+      });
+      const fetchCancelled = new Promise((resolve) => {
+        markFetchCancelled = resolve;
+      });
+      const gate = new ConcurrencyGate(1);
+      const fetcher = {
+        fetch(_target, { signal }) {
+          observedSignal = signal;
+          markFetchStarted();
+          return new Promise((resolve, reject) => {
+            const cancel = () => {
+              reject(signal.reason);
+              markFetchCancelled();
+            };
+            if (signal.aborted) cancel();
+            else signal.addEventListener('abort', cancel, { once: true });
+          });
+        }
+      };
+      const { origin } = await startServer({ fetcher, concurrencyGate: gate });
+      const target = new URL('/api/analyze?url=example.com', origin);
+      const clientRequest = http.request(target);
+      clientRequest.on('error', () => {});
+      clientRequest.end();
+
+      await fetchStarted;
+      clientRequest.destroy();
+      await fetchCancelled;
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(observedSignal.aborted, true);
+      assert.equal(gate.active, 0);
+    }
+  );
+
+  it(
+    'holds the concurrency permit until an aborted analysis worker has terminated',
+    { timeout: 2000 },
+    async () => {
+      const worker = new EventEmitter();
+      let finishTermination;
+      let markWorkerStarted;
+      let markTerminationStarted;
+      const workerStarted = new Promise((resolve) => {
+        markWorkerStarted = resolve;
+      });
+      const terminationStarted = new Promise((resolve) => {
+        markTerminationStarted = resolve;
+      });
+      const termination = new Promise((resolve) => {
+        finishTermination = resolve;
+      });
+      worker.terminate = () => {
+        markTerminationStarted();
+        return termination;
+      };
+      const analysisRunner = new WorkerAnalysisRunner({
+        workerFactory() {
+          markWorkerStarted();
+          return worker;
+        }
+      });
+      const gate = new ConcurrencyGate(1);
+      const { origin } = await startServer({ analysisRunner, concurrencyGate: gate });
+      const clientRequest = http.request(new URL('/api/analyze?url=example.com', origin));
+      clientRequest.on('error', () => {});
+      clientRequest.end();
+
+      await workerStarted;
+      clientRequest.destroy();
+      await terminationStarted;
+      assert.equal(gate.active, 1);
+
+      finishTermination(1);
+      for (let turn = 0; turn < 10 && gate.active !== 0; turn += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.equal(gate.active, 0);
+    }
+  );
 
   it('serves 404s and rejects unsupported static methods', async () => {
     const { origin } = await startServer();

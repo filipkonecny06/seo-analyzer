@@ -2,6 +2,7 @@
 
 const { PageSnapshot } = require('./page-snapshot');
 const { DEFAULT_RULES } = require('./rules');
+const { METHODOLOGY_VERSION } = require('../version');
 
 function gradeForScore(score) {
   if (score >= 90) return 'A';
@@ -40,7 +41,7 @@ class SeoAnalyzer {
       score,
       maxScore: this.maxScore,
       grade: gradeForScore(score),
-      methodologyVersion: '2.0',
+      methodologyVersion: METHODOLOGY_VERSION,
       metadata: snapshot.metadata,
       content: snapshot.content,
       checks: checks.map(({ recommendation: _recommendation, ...check }) => check),

@@ -32,7 +32,19 @@ class PageFetchError extends AppError {
   }
 }
 
+class AnalysisExecutionError extends AppError {
+  constructor(message, options = {}) {
+    super(message, {
+      ...options,
+      code: options.code || 'ANALYSIS_FAILED',
+      statusCode: options.statusCode || 500,
+      expose: Boolean(options.expose)
+    });
+  }
+}
+
 module.exports = {
+  AnalysisExecutionError,
   AppError,
   PageFetchError,
   UrlPolicyError
