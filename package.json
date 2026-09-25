@@ -38,11 +38,11 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^24.13.3",
+    "@types/node": "^26.6.2",
     "c8": "^12.0.0",
-    "eslint": "^10.9.1",
-    "globals": "^17.11.0",
-    "prettier": "^3.9.6",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
     "typescript": "^7.0.2"
   }
 }
